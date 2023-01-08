@@ -11,6 +11,7 @@ from smartapi import SmartConnect
 import pyotp
 from threading import Thread
 
+
 def login(user, pin, apikey, authkey, webhook_url=None):
     global obj
     authkey = pyotp.TOTP(authkey)
@@ -183,6 +184,7 @@ def fetch_lot_size(name):
 
 
 def fetch_symbol_token(name):
+
     """Fetches symbol & token for a given scrip name. Provide just a single world if
     you want to fetch the symbol & token for the cash segment. If you want to fetch the
     symbol & token for the options segment, provide name in the format '{name} {strike} {expiry} {optiontype}'.
@@ -243,6 +245,7 @@ def fetchpreviousclose(exchange_seg, symbol, token):
 
 
 def fetch_straddle_price(name, expiry, strike, return_total_price=False):
+
     """Fetches the price of the straddle for a given name, expiry and strike. Expiry should be in the DDMMMYY format.
     If return_total_price is True, then the total price of the straddle is returned. If return_total_price is False,
     then the price of the call and put is returned as a tuple."""
@@ -753,9 +756,9 @@ class Index:
             ltp = self.fetch_ltp()
             current_strike = findstrike(ltp, self.base)
             if self.name == 'FINNIFTY':
-                strike_range = np.arange(current_strike - self.base*3, current_strike + self.base*3, self.base)
+                strike_range = np.arange(current_strike - self.base * 3, current_strike + self.base * 3, self.base)
             else:
-                strike_range = np.arange(current_strike - self.base, current_strike + self.base*2, self.base)
+                strike_range = np.arange(current_strike - self.base, current_strike + self.base * 2, self.base)
             disparity_dict = {}
             for strike in strike_range:
                 call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} CE')
@@ -1126,7 +1129,7 @@ class Index:
 
         """Params: quantity_in_lots, ce_hedge_offset, pe_hedge_offset, exit_time (tuple of hour and minute)"""
 
-        if timetoexpiry(self.current_expiry)*365 < 1:
+        if timetoexpiry(self.current_expiry) * 365 < 1:
             expiry = self.next_expiry
         else:
             expiry = self.current_expiry
@@ -1177,7 +1180,7 @@ class Index:
                     lots_to_sell = round(abs(current_delta) / self.lot_size, 0)
                     notifier(f'Delta greater than {delta_threshold}. Selling {lots_to_sell} ' +
                              f'synthetic futures to reduce delta.\n', self.webhook_url)
-                    place_synthetic_fut(self.name, atm_strike, expiry, 'SELL', lots_to_sell*self.lot_size)
+                    place_synthetic_fut(self.name, atm_strike, expiry, 'SELL', lots_to_sell * self.lot_size)
                     delta_position_dict[synthetic_fut_call] += -1 * lots_to_sell * self.lot_size
                     delta_position_dict[synthetic_fut_put] += lots_to_sell * self.lot_size
 
@@ -1185,7 +1188,7 @@ class Index:
                     lots_to_buy = round(abs(current_delta) / self.lot_size, 0)
                     notifier(f'Delta less than {-delta_threshold}. Buying {lots_to_buy} ' +
                              f'synthetic futures to reduce delta.\n', self.webhook_url)
-                    place_synthetic_fut(self.name, atm_strike, expiry, 'BUY', lots_to_buy*self.lot_size)
+                    place_synthetic_fut(self.name, atm_strike, expiry, 'BUY', lots_to_buy * self.lot_size)
                     delta_position_dict[synthetic_fut_call] += lots_to_buy * self.lot_size
                     delta_position_dict[synthetic_fut_put] += -1 * lots_to_buy * self.lot_size
 
