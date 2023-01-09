@@ -693,7 +693,7 @@ class Index:
         buy_strike = findstrike(self.fetch_previous_close() * strike_offset, self.base)
 
         # Matching estimated previous strike with actual sold strike
-        with open("daily_sold_strike.txt", "r") as file:
+        with open(f"{self.name}_daily_sold_strike.txt", "r") as file:
             sold_strike = int(file.read())
         if sold_strike != buy_strike:
             notifier(f'Estimated sold strike {buy_strike} does not match ' +
@@ -721,7 +721,7 @@ class Index:
                                       multiple_of_orders, order_tag='Daily overnight short straddle')
 
         # Updating daily_sold_strike.txt
-        with open("daily_sold_strike.txt", "w") as file:
+        with open(f"{self.name}_daily_sold_strike.txt", "w") as file:
             file.write(str(sell_strike))
         return
 
@@ -766,7 +766,8 @@ class Index:
                 call_price = fetchltp('NFO', call_symbol, call_token)
                 put_price = fetchltp('NFO', put_symbol, put_token)
                 disparity = abs(call_price - put_price) / min(call_price, put_price) * 100
-                disparity_dict[strike] = disparity, call_symbol, call_token, put_symbol, put_token
+                disparity_dict[strike] = disparity, call_symbol, call_token, \
+                    put_symbol, put_token, call_price, put_price
             return disparity_dict
 
         disparities = fetch_disparity_dict()
@@ -830,14 +831,17 @@ class Index:
         def price_tracker():
 
             nonlocal call_price, put_price
+            loop = 0
             while in_trade:
                 underlying_price = self.fetch_ltp()
                 call_price = fetchltp('NFO', call_symbol, call_token)
                 put_price = fetchltp('NFO', put_symbol, put_token)
                 iv = straddleiv(call_price, put_price, underlying_price, equal_strike, timetoexpiry(expiry))
-                print(f'Index: {self.name}\nTime: {currenttime().time()}\nStrike: {equal_strike}\n' +
-                      f'Call Price: {call_price}\nPut Price: {put_price}\n' +
-                      f'Total price: {call_price + put_price}\nIV: {iv}\n')
+                loop += 1
+                if loop % 25 == 0:
+                    print(f'Index: {self.name}\nTime: {currenttime().time()}\nStrike: {equal_strike}\n' +
+                          f'Call Price: {call_price}\nPut Price: {put_price}\n' +
+                          f'Total price: {call_price + put_price}\nIV: {iv}\n')
 
         price_updater = Thread(target=price_tracker)
         price_updater.start()
@@ -854,7 +858,7 @@ class Index:
                 if all(statuses == 'trigger pending'):
                     return False, False
 
-                elif all(statuses == 'rejected'):
+                elif all(statuses == 'rejected') or all(statuses == 'cancelled'):
                     rejection_reason = lookup_and_return(orderbook, 'orderid', order_ids, 'text')
                     if all(rejection_reason == '17070 : The Price is out of the LPP range'):
                         notifier(f'{self.name} {side} stoploss orders triggered but rejected ' +
@@ -1079,7 +1083,7 @@ class Index:
         otm_put_buy_strike = findstrike(ltp * pe_hedge_offset, self.base)
 
         # Fetching the previous strikes
-        with open('daily_butterfly.txt', 'r') as file:
+        with open(f'{self.name}_daily_butterfly.txt', 'r') as file:
             yesterday_strikes = file.readlines()
             yesterday_strikes = [int(strike.rstrip().split(':')[1]) for strike in yesterday_strikes]
             atm_buy_strike = yesterday_strikes[0]
@@ -1120,7 +1124,7 @@ class Index:
                                       quantity_in_lots, multiple_of_orders, order_tag='Daily short Butterfly hedges')
 
         # Updating daily_butterfly.txt
-        with open("daily_butterfly.txt", "w") as file:
+        with open(f"{self.name}_daily_butterfly.txt", "w") as file:
             file.write(f'ATM: {atm_sell_strike}\nCall hedge: {otm_call_buy_strike}\nPut hedge: {otm_put_buy_strike}')
         return
 
