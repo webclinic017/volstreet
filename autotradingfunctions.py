@@ -19,6 +19,7 @@ def login(user, pin, apikey, authkey, webhook_url=None):
     data = obj.generateSession(user, pin, authkey.now())
     if data['message'] != 'SUCCESS':
         for attempt in range(2, 7):
+            sleep(10)
             notifier(f'Login attempt {attempt}.', webhook_url)
             data = obj.generateSession(user, pin, authkey.now())
             if data['message'] == 'SUCCESS':
@@ -26,7 +27,6 @@ def login(user, pin, apikey, authkey, webhook_url=None):
             if attempt == 6:
                 notifier('Login failed.', webhook_url)
                 raise Exception('Login failed.')
-            sleep(30)
     notifier(f'Date: {currenttime().strftime("%d %b %Y %H:%M:%S")}\nLogged in successfully.', webhook_url)
 
 

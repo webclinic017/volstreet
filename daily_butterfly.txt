@@ -1,3 +1,0 @@
-ATM: 17800
-Call hedge: 18150
-Put hedge: 17450
