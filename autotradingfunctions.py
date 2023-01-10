@@ -168,7 +168,7 @@ def notifier(message, webhook_url=None):
 
 # Market Hours
 def markethours():
-    if time(9, 15) < currenttime().time() < time(15, 30):
+    if time(9, 10) < currenttime().time() < time(15, 30):
         return True
     else:
         return False
@@ -1010,7 +1010,9 @@ class Index:
             for orderid in pending_sl_orders:
                 obj.cancelOrder(orderid, 'STOPLOSS')
 
-        # Squaring up open positions if any
+        # Exit sequence below
+        call_price = fetchltp('NFO', call_symbol, call_token)
+        put_price = fetchltp('NFO', put_symbol, put_token)
 
         if call_sl_hit and put_sl_hit:
             notifier(f'{self.name}: Both stoplosses were triggered.', self.webhook_url)
@@ -1222,3 +1224,6 @@ class Index:
             notifier('No delta positions to square off.', self.webhook_url)
         else:
             raise AssertionError('Delta positions are not balanced.')
+
+    def fetch_specs(self):
+        pass
