@@ -1010,7 +1010,9 @@ class Index:
             for orderid in pending_sl_orders:
                 obj.cancelOrder(orderid, 'STOPLOSS')
 
-        # Squaring up open positions if any
+        # Exit sequence below
+        call_price = fetchltp('NFO', call_symbol, call_token)
+        put_price = fetchltp('NFO', put_symbol, put_token)
 
         if call_sl_hit and put_sl_hit:
             notifier(f'{self.name}: Both stoplosses were triggered.', self.webhook_url)
