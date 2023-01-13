@@ -10,24 +10,71 @@ import json
 from smartapi import SmartConnect
 import pyotp
 from threading import Thread
+from SmartWebSocketV2 import SmartWebSocketV2
 
 
 def login(user, pin, apikey, authkey, webhook_url=None):
-    global obj
+    global obj, login_data
     authkey = pyotp.TOTP(authkey)
     obj = SmartConnect(api_key=apikey)
-    data = obj.generateSession(user, pin, authkey.now())
-    if data['message'] != 'SUCCESS':
+    login_data = obj.generateSession(user, pin, authkey.now())
+    if login_data['message'] != 'SUCCESS':
         for attempt in range(2, 7):
             sleep(10)
             notifier(f'Login attempt {attempt}.', webhook_url)
-            data = obj.generateSession(user, pin, authkey.now())
-            if data['message'] == 'SUCCESS':
+            login_data = obj.generateSession(user, pin, authkey.now())
+            if login_data['message'] == 'SUCCESS':
                 break
             if attempt == 6:
                 notifier('Login failed.', webhook_url)
                 raise Exception('Login failed.')
     notifier(f'Date: {currenttime().strftime("%d %b %Y %H:%M:%S")}\nLogged in successfully.', webhook_url)
+
+
+def start_websocket(exchangetype=1, tokens=None):
+
+    websocket_started = False
+
+    if tokens is None:
+        tokens = ['26000', '26009']
+
+    global sws, price_dict
+    price_dict = {}
+    auth_token = login_data['data']['jwtToken']
+    feed_token = obj.getfeedToken()
+    sws = SmartWebSocketV2(auth_token, obj.api_key, obj.userId, feed_token)
+
+    correlation_id = 'dummy'
+    mode = 1
+    token_list = [{'exchangeType': exchangetype, 'tokens': tokens}]
+
+    def on_data(wsapp, message):
+        price_dict[message['token']] = {'ltp': message['last_traded_price']/100,
+                                        'timestamp': datetime.fromtimestamp(
+                                            message['exchange_timestamp']/1000).strftime('%H:%M:%S')}
+
+    def on_open(wsapp):
+        nonlocal websocket_started
+        print("Starting Websocket")
+        sws.subscribe(correlation_id, mode, token_list)
+        websocket_started = True
+
+    def on_error(wsapp, error):
+        print(error)
+
+    def on_close(wsapp):
+        print("Close")
+
+    # Assign the callbacks.
+    sws.on_open = on_open
+    sws.on_data = on_data
+    sws.on_error = on_error
+    sws.on_close = on_close
+
+    Thread(target=sws.connect).start()
+
+    while not websocket_started:
+        sleep(1)
 
 
 # Ticker file
@@ -67,6 +114,7 @@ def fetch_book(book):
 
 # Look up and return function for position and orderbook
 def lookup_and_return(book, fieldtolookup, valuetolookup, fieldtoreturn):
+
     """Specify the dictionary as 'positions' or 'orderbook' or pass a dictionary. The valuetolookup can be
     a list or a single value. If provided a list, the function will return a numpy array of values. If provided a
     single value, the function will return a single value. Will return an empty array or 0 if the value is
@@ -196,7 +244,7 @@ def fetch_symbol_token(name):
                 0]
         elif name == 'FINNIFTY':
             futures = scrips.loc[(scrips.name == name) & (scrips.instrumenttype == 'FUTIDX'),
-                                 ['expiry', 'symbol', 'token']]
+            ['expiry', 'symbol', 'token']]
             sorted_expiry_array = pd.to_datetime(futures.expiry, format='%d%b%Y').sort_values()
             futures = futures.loc[sorted_expiry_array.index]
             symbol, token = futures.iloc[0][['symbol', 'token']].values
@@ -381,7 +429,6 @@ def fetch_price_iv_delta(position_string, underlying_price=None):
 
 
 def place_synthetic_fut(name, strike, expiry, buy_or_sell, quantity, price='MARKET'):
-
     """Places a synthetic future order. Quantity is in number of shares."""
 
     call_symbol, call_token = fetch_symbol_token(f'{name} {strike} {expiry} CE')
@@ -407,7 +454,6 @@ def place_synthetic_fut(name, strike, expiry, buy_or_sell, quantity, price='MARK
 # ORDER FUNCTIONS BELOW #
 
 def placeorder(symbol, token, qty, buyorsell, orderprice, ordertag=""):
-
     """Provide symbol, token, qty (shares), buyorsell, orderprice, ordertag (optional)"""
 
     if orderprice == 'MARKET':
@@ -501,6 +547,7 @@ class Index:
             self.base = 50
         elif self.name == 'FINNIFTY':
             self.base = 50
+            sws.subscribe('dummy', 1, [{'exchangeType': 2, 'tokens': [self.token]}])
         else:
             raise ValueError('Index name not valid')
 
@@ -752,36 +799,61 @@ class Index:
         kwargs: 'target_disparity', 'stoploss'
         """
 
-        def fetch_disparity_dict():
-            ltp = self.fetch_ltp()
+        def scanner():
+
+            """Scans the market for the best strike to trade"""
+
+            ltp = price_dict.get(self.token, 0)['ltp']
             current_strike = findstrike(ltp, self.base)
-            if self.name == 'FINNIFTY':
-                strike_range = np.arange(current_strike - self.base * 3, current_strike + self.base * 3, self.base)
-            else:
-                strike_range = np.arange(current_strike - self.base, current_strike + self.base * 2, self.base)
-            disparity_dict = {}
+            strike_range = np.arange(current_strike - self.base * 6, current_strike + self.base * 6, self.base)
+
+            call_token_list = []
+            put_token_list = []
+            call_symbol_list = []
+            put_symbol_list = []
+            strike_list = []
             for strike in strike_range:
                 call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} CE')
                 put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} PE')
-                call_price = fetchltp('NFO', call_symbol, call_token)
-                put_price = fetchltp('NFO', put_symbol, put_token)
-                disparity = abs(call_price - put_price) / min(call_price, put_price) * 100
-                disparity_dict[strike] = disparity, call_symbol, call_token, \
-                    put_symbol, put_token, call_price, put_price
-            return disparity_dict
+                call_token_list.append(call_token)
+                put_token_list.append(put_token)
+                call_symbol_list.append(call_symbol)
+                put_symbol_list.append(put_symbol)
+                strike_list.append(strike)
+            token_list = [{'exchangeType': 2, 'tokens': call_token_list+put_token_list}]
+            sws.subscribe('dummy', 1, token_list)
+            sleep(5)
 
-        disparities = fetch_disparity_dict()
-        if wait_for_equality:
-            while min(disparities.values())[0] > kwargs['target_disparity']:
-                disparities = fetch_disparity_dict()
-                print(f'{self.name} current disparities: {[(key, value[0]) for key, value in disparities.items()]}')
-                if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
-                    notifier('Intraday straddle exited due to time limit.', self.webhook_url)
-                    return
+            # Fetching the last traded prices of different strikes from the global price_dict using token values
+            call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
+            put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
+            disparities = np.abs(call_ltps - put_ltps)/np.minimum(call_ltps, put_ltps)*100
+            if wait_for_equality:
+                while np.min(disparities) > kwargs['target_disparity']:
+                    call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
+                    put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
+                    disparities = np.abs(call_ltps - put_ltps)/np.minimum(call_ltps, put_ltps)*100
+                    print(f'Time: {currenttime().strftime("%H:%M:%S")}\n' +
+                          f'Index: {self.name}\n' +
+                          f'Current lowest disparity: {np.min(disparities):.2f}\n' +
+                          f'Strike: {strike_list[np.argmin(disparities)]}\n')
+                    if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
+                        notifier('Intraday straddle exited due to time limit.', self.webhook_url)
+                        return
+            strike_to_trade = strike_list[np.argmin(disparities)]
+            call_symbol = call_symbol_list[np.argmin(disparities)]
+            put_symbol = put_symbol_list[np.argmin(disparities)]
+            call_token = call_token_list[np.argmin(disparities)]
+            put_token = put_token_list[np.argmin(disparities)]
+            call_ltp = call_ltps[np.argmin(disparities)]
+            put_ltp = put_ltps[np.argmin(disparities)]
+            return strike_to_trade, call_symbol, put_symbol, call_token, put_token, call_ltp, put_ltp
 
-        equal_strike = min(disparities, key=disparities.get)
+        equal_strike, call_symbol, put_symbol, call_token, put_token, call_price, put_price = scanner()
         expiry = self.current_expiry
-        notifier(f'Initiating intraday trade on {equal_strike} strike.', self.webhook_url)
+        print(f'Index: {self.name}, Strike: {equal_strike}, Call: {call_price}, Put: {put_price}')
+        return
+        notifier(f'{self.name}: Initiating intraday trade on {equal_strike} strike.', self.webhook_url)
         call_avg_price, put_avg_price = self.place_straddle_order(equal_strike, expiry, 'SELL', quantity_in_lots,
                                                                   multiple_of_orders, return_avg_price=True,
                                                                   order_tag='Intraday straddle')
@@ -793,8 +865,6 @@ class Index:
                 sl = 1.7
             else:
                 sl = 1.5
-
-        call_symbol, call_token, put_symbol, put_token = disparities[equal_strike][1:5]
 
         call_stoploss_order_ids = []
         put_stoploss_order_ids = []
@@ -825,8 +895,6 @@ class Index:
         in_trade = True
         call_sl_hit = False
         put_sl_hit = False
-        call_price = disparities[equal_strike][5]
-        put_price = disparities[equal_strike][6]
 
         def price_tracker():
 
