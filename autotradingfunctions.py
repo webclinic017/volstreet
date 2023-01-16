@@ -74,6 +74,7 @@ def start_websocket(exchangetype=1, tokens=None):
     Thread(target=sws.connect).start()
 
     while not websocket_started:
+        print('Waiting for websocket to start')
         sleep(1)
 
 
@@ -84,6 +85,20 @@ def get_ticker_file():
     data = urllib.request.urlopen(url).read().decode()
     scrips = pd.read_json(data)
     return scrips
+
+
+def fetch_holidays():
+
+    url = 'https://upstox.com/stocks-market/nse-bse-share-market-holiday-calendar-2023-india/'
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                             'AppleWebKit/537.36 (KHTML, like Gecko) '
+                             'Chrome/80.0.3987.132 Safari/537.36'}
+    r = requests.get(url, headers=headers)
+
+    holiday_df = pd.read_html(r.text)[0]
+    holiday_df['Date'] = pd.to_datetime(holiday_df['Date'], format='%d %B %Y')
+    holidays = holiday_df['Date'].values
+    return holidays
 
 
 def fetch_book(book):
@@ -523,11 +538,9 @@ class Index:
 
     """Initialize an index with the name of the index in uppercase"""
 
-    def __init__(self, name, webhook_url=None):
+    def __init__(self, name, webhook_url=None, subscribe_to_ws=False):
 
         self.name = name
-        self.symbol, self.token = fetch_symbol_token(name)
-        self.lot_size = fetch_lot_size(name)
         self.ltp = None
         self.previous_close = None
         self.current_strike = None
@@ -540,19 +553,39 @@ class Index:
         self.points_captured = None
         self.stoploss = None
         self.webhook_url = webhook_url
+
+        self.symbol, self.token = fetch_symbol_token(name)
+        self.lot_size = fetch_lot_size(name)
         self.fetch_expirys()
         self.freeze_qty = self.fetch_freeze_limit()
 
         if self.name == 'BANKNIFTY':
             self.base = 100
+            self.exchange_type = 1
         elif self.name == 'NIFTY':
             self.base = 50
+            self.exchange_type = 1
         elif self.name == 'FINNIFTY':
             self.base = 50
-            if sws in globals():
-                sws.subscribe('websocket', 1, [{'exchangeType': 2, 'tokens': [self.token]}])
+            self.exchange_type = 2
         else:
             raise ValueError('Index name not valid')
+
+        if subscribe_to_ws:
+            try:
+                sws.subscribe('websocket', 1, [{'exchangeType': self.exchange_type, 'tokens': [self.token]}])
+                print(f'{self.name}: Subscribed underlying to the websocket')
+            except NameError:
+                print('Websocket not initialized. Please initialize the websocket before subscribing to it.')
+
+    def fetch_freeze_limit(self):
+        freeze_qty_url = 'https://www1.nseindia.com/content/fo/qtyfreeze.xls'
+        df = pd.read_excel(freeze_qty_url)
+        df.columns = df.columns.str.strip()
+        df['SYMBOL'] = df['SYMBOL'].str.strip()
+        freeze_qty = df[df['SYMBOL'] == self.name]['VOL_FRZ_QTY'].values[0]
+        freeze_qty_in_lots = freeze_qty / self.lot_size
+        return freeze_qty_in_lots
 
     def fetch_expirys(self):
 
@@ -629,14 +662,14 @@ class Index:
 
         call_order_id_list = []
         put_order_id_list = []
-        for quantity_in_lots in spliced_orders:
+        for quantity in spliced_orders:
 
             call_order_id = placeorder(call_symbol, call_token,
-                                       quantity_in_lots * self.lot_size,
+                                       quantity * self.lot_size,
                                        buy_or_sell, call_price * limit_price_extender,
                                        ordertag=order_tag)
             put_order_id = placeorder(put_symbol, put_token,
-                                      quantity_in_lots * self.lot_size,
+                                      quantity * self.lot_size,
                                       buy_or_sell, put_price * limit_price_extender,
                                       ordertag=order_tag)
             call_order_id_list.append(call_order_id)
@@ -711,13 +744,13 @@ class Index:
 
         call_order_id_list = []
         put_order_id_list = []
-        for quantity_in_lots in spliced_orders:
+        for quantity in spliced_orders:
             call_order_id = placeorder(call_symbol, call_token,
-                                       quantity_in_lots * self.lot_size,
+                                       quantity * self.lot_size,
                                        buy_or_sell, call_price * limit_price_extender,
                                        ordertag=order_tag)
             put_order_id = placeorder(put_symbol, put_token,
-                                      quantity_in_lots * self.lot_size,
+                                      quantity * self.lot_size,
                                       buy_or_sell, put_price * limit_price_extender,
                                       ordertag=order_tag)
             call_order_id_list.append(call_order_id)
@@ -867,26 +900,36 @@ class Index:
                 call_symbol_list.append(call_symbol)
                 put_symbol_list.append(put_symbol)
                 strike_list.append(strike)
-            token_list = [{'exchangeType': 2, 'tokens': call_token_list+put_token_list}]
-            sws.subscribe('websocket', 1, token_list)
-            sleep(5)
+
+            call_and_put_token_list = call_token_list + put_token_list
+            token_list_subscribe = [{'exchangeType': 2, 'tokens': call_and_put_token_list}]
+            sws.subscribe('websocket', 1, token_list_subscribe)
+            sleep(3)
 
             # Fetching the last traded prices of different strikes from the global price_dict using token values
             call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
             put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
             disparities = np.abs(call_ltps - put_ltps)/np.minimum(call_ltps, put_ltps)*100
+
+            # If wait_for_equality is True, waits for call and put prices to be equal before selecting a strike
             if wait_for_equality:
+
+                loop_number = 1
                 while np.min(disparities) > kwargs['target_disparity']:
                     call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
                     put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
                     disparities = np.abs(call_ltps - put_ltps)/np.minimum(call_ltps, put_ltps)*100
-                    print(f'Time: {currenttime().strftime("%H:%M:%S")}\n' +
-                          f'Index: {self.name}\n' +
-                          f'Current lowest disparity: {np.min(disparities):.2f}\n' +
-                          f'Strike: {strike_list[np.argmin(disparities)]}\n')
+                    if loop_number % 200000 == 0:
+                        print(f'Time: {currenttime().strftime("%H:%M:%S")}\n' +
+                              f'Index: {self.name}\n' +
+                              f'Current lowest disparity: {np.min(disparities):.2f}\n' +
+                              f'Strike: {strike_list[np.argmin(disparities)]}\n')
                     if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
                         notifier('Intraday straddle exited due to time limit.', self.webhook_url)
                         return
+                    loop_number += 1
+
+            # Selecting the strike with the lowest disparity
             strike_to_trade = strike_list[np.argmin(disparities)]
             call_symbol = call_symbol_list[np.argmin(disparities)]
             put_symbol = put_symbol_list[np.argmin(disparities)]
@@ -894,13 +937,22 @@ class Index:
             put_token = put_token_list[np.argmin(disparities)]
             call_ltp = call_ltps[np.argmin(disparities)]
             put_ltp = put_ltps[np.argmin(disparities)]
+
+            # Unsubscribing from the tokens
+            tokens_to_unsubscribe = [token for token in call_and_put_token_list if token not in [call_token, put_token]]
+            token_list_unsubscribe = [{'exchangeType': 2, 'tokens': tokens_to_unsubscribe}]
+            sws.unsubscribe('websocket', 1, token_list_unsubscribe)
+            for token in tokens_to_unsubscribe:
+                del price_dict[token]
+            print(f'{self.name}: Unsubscribed from tokens')
             return strike_to_trade, call_symbol, put_symbol, call_token, put_token, call_ltp, put_ltp
 
         equal_strike, call_symbol, put_symbol, call_token, put_token, call_price, put_price = scanner()
         expiry = self.current_expiry
-        print(f'Index: {self.name}, Strike: {equal_strike}, Call: {call_price}, Put: {put_price}')
-
+        #print(f'Index: {self.name}, Strike: {equal_strike}, Call: {call_price}, Put: {put_price}')
         notifier(f'{self.name}: Initiating intraday trade on {equal_strike} strike.', self.webhook_url)
+
+        # Placing orders
         call_avg_price, put_avg_price = self.place_straddle_order(equal_strike, expiry, 'SELL', quantity_in_lots,
                                                                   return_avg_price=True, order_tag='Intraday straddle')
 
@@ -912,12 +964,13 @@ class Index:
             else:
                 sl = 1.5
 
+        # Placing stoploss orders
         call_stoploss_order_ids = []
         put_stoploss_order_ids = []
-        for quantity_in_lots in spliced_orders:
-            call_sl_order_id = placeSLorder(call_symbol, call_token, quantity_in_lots * self.lot_size,
+        for quantity in spliced_orders:
+            call_sl_order_id = placeSLorder(call_symbol, call_token, quantity * self.lot_size,
                                             'BUY', call_avg_price * sl, 'Stoploss call')
-            put_sl_order_id = placeSLorder(put_symbol, put_token, quantity_in_lots * self.lot_size,
+            put_sl_order_id = placeSLorder(put_symbol, put_token, quantity * self.lot_size,
                                            'BUY', put_avg_price * sl, 'Stoploss put')
             call_stoploss_order_ids.append(call_sl_order_id)
             put_stoploss_order_ids.append(put_sl_order_id)
@@ -945,17 +998,18 @@ class Index:
         def price_tracker():
 
             nonlocal call_price, put_price
-            loop = 0
+            loop_number = 0
             while in_trade:
-                underlying_price = self.fetch_ltp()
-                call_price = fetchltp('NFO', call_symbol, call_token)
-                put_price = fetchltp('NFO', put_symbol, put_token)
+                underlying_price = price_dict.get(self.token, 0)['ltp']
+                call_price = price_dict.get(call_token, 0)['ltp']
+                put_price = price_dict.get(put_token, 0)['ltp']
                 iv = straddleiv(call_price, put_price, underlying_price, equal_strike, timetoexpiry(expiry))
-                loop += 1
-                if loop % 25 == 0:
+
+                if loop_number % 100 == 0:
                     print(f'Index: {self.name}\nTime: {currenttime().time()}\nStrike: {equal_strike}\n' +
                           f'Call Price: {call_price}\nPut Price: {put_price}\n' +
                           f'Total price: {call_price + put_price}\nIV: {iv}\n')
+                loop_number += 1
 
         price_updater = Thread(target=price_tracker)
         price_updater.start()
@@ -1028,16 +1082,16 @@ class Index:
                     if call_sl_orders_complete:
                         pass
                     else:
-                        for quantity_in_lots in spliced_orders:
-                            placeorder(call_symbol, call_token, quantity_in_lots * self.lot_size,
+                        for quantity in spliced_orders:
+                            placeorder(call_symbol, call_token, quantity * self.lot_size,
                                        'BUY', 'MARKET')
 
                     # Cancelling and placing new put sl orders
                     for orderid in put_stoploss_order_ids:
                         obj.cancelOrder(orderid, 'STOPLOSS')
                     put_stoploss_order_ids = []
-                    for quantity_in_lots in spliced_orders:
-                        put_sl_order_id = placeSLorder(put_symbol, put_token, quantity_in_lots * self.lot_size,
+                    for quantity in spliced_orders:
+                        put_sl_order_id = placeSLorder(put_symbol, put_token, quantity * self.lot_size,
                                                        'BUY', put_avg_price, 'Stoploss put')
                         put_stoploss_order_ids.append(put_sl_order_id)
 
@@ -1048,8 +1102,8 @@ class Index:
                             if put_sl_orders_complete:
                                 pass
                             else:
-                                for quantity_in_lots in spliced_orders:
-                                    placeorder(put_symbol, put_token, quantity_in_lots * self.lot_size,
+                                for quantity in spliced_orders:
+                                    placeorder(put_symbol, put_token, quantity * self.lot_size,
                                                'BUY', 'MARKET')
                             break
                         else:
@@ -1061,16 +1115,16 @@ class Index:
                     if put_sl_orders_complete:
                         pass
                     else:
-                        for quantity_in_lots in spliced_orders:
-                            placeorder(put_symbol, put_token, quantity_in_lots * self.lot_size,
+                        for quantity in spliced_orders:
+                            placeorder(put_symbol, put_token, quantity * self.lot_size,
                                        'BUY', 'MARKET')
 
                     # Cancelling and placing new put sl orders
                     for orderid in call_stoploss_order_ids:
                         obj.cancelOrder(orderid, 'STOPLOSS')
                     call_stoploss_order_ids = []
-                    for quantity_in_lots in spliced_orders:
-                        call_sl_order_id = placeSLorder(call_symbol, call_token, quantity_in_lots * self.lot_size,
+                    for quantity in spliced_orders:
+                        call_sl_order_id = placeSLorder(call_symbol, call_token, quantity * self.lot_size,
                                                         'BUY', call_avg_price, 'Stoploss call')
                         call_stoploss_order_ids.append(call_sl_order_id)
 
@@ -1081,8 +1135,8 @@ class Index:
                             if call_sl_orders_complete:
                                 pass
                             else:
-                                for quantity_in_lots in spliced_orders:
-                                    placeorder(call_symbol, call_token, quantity_in_lots * self.lot_size,
+                                for quantity in spliced_orders:
+                                    placeorder(call_symbol, call_token, quantity * self.lot_size,
                                                'BUY', 'MARKET')
                             break
                         else:
@@ -1097,7 +1151,7 @@ class Index:
 
             while currenttime().time() < time(*exit_time):
                 current_time = currenttime().time().strftime('%H:%M:%S')
-                print(f'{current_time} - Waiting for exit time')
+                print(f'{current_time} {self.name} - Waiting for exit time')
                 sleep(15)
 
             # Checking which stoplosses orders were triggered
@@ -1138,8 +1192,8 @@ class Index:
             self.stoploss = 'Both'
 
         elif call_sl_hit:
-            for quantity_in_lots in spliced_orders:
-                placeorder(put_symbol, put_token, quantity_in_lots * self.lot_size, 'BUY', put_price * 1.1,
+            for quantity in spliced_orders:
+                placeorder(put_symbol, put_token, quantity * self.lot_size, 'BUY', put_price * 1.1,
                            'Exit order')
                 sleep(0.3)
             notifier(f'{self.name}: Exited put. Call stoploss was triggered.', self.webhook_url)
@@ -1149,8 +1203,8 @@ class Index:
             self.stoploss = 'Call'
 
         elif put_sl_hit:
-            for quantity_in_lots in spliced_orders:
-                placeorder(call_symbol, call_token, quantity_in_lots * self.lot_size, 'BUY', call_price * 1.1,
+            for quantity in spliced_orders:
+                placeorder(call_symbol, call_token, quantity * self.lot_size, 'BUY', call_price * 1.1,
                            'Exit order')
                 sleep(0.3)
             notifier(f'{self.name}: Exited call. Put stoploss was triggered.', self.webhook_url)
@@ -1167,7 +1221,9 @@ class Index:
 
         self.order_list[0]['Points Captured'] = self.points_captured
         self.order_list[0]['Stoploss'] = self.stoploss
+
         in_trade = False
+        sws.close_connection()
 
     def rollover_short_butterfly(self, quantity_in_lots, ce_hedge_offset=1.02,
                                  pe_hedge_offset=0.98):
@@ -1338,12 +1394,3 @@ class Index:
             notifier('No delta positions to square off.', self.webhook_url)
         else:
             raise AssertionError('Delta positions are not balanced.')
-
-    def fetch_freeze_limit(self):
-        freeze_qty_url = 'https://www1.nseindia.com/content/fo/qtyfreeze.xls'
-        df = pd.read_excel(freeze_qty_url)
-        df.columns = df.columns.str.strip()
-        df['SYMBOL'] = df['SYMBOL'].str.strip()
-        freeze_qty = df[df['SYMBOL'] == self.name]['VOL_FRZ_QTY'].values[0]
-        freeze_qty_in_lots = freeze_qty / self.lot_size
-        return freeze_qty_in_lots
