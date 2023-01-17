@@ -417,53 +417,26 @@ def straddleiv(callprice, putprice, spot, strike, timeleft):
     return round(avg_iv, 2)
 
 
-def fetch_price_iv_delta(position_string, underlying_price=None):
+def fetch_greeks(position_string, position_price, underlying_price):
+
     """Fetches the price, iv and delta of a stock"""
 
     name, strike, expiry, option_type = position_string.split()
     strike = int(strike)
     time_left = timetoexpiry(expiry)
 
-    if underlying_price is None:
-        underlying_symbol, underlying_token = fetch_symbol_token(name)
-        underlying_price = fetchltp('NSE', underlying_symbol, underlying_token)
-
-    position_symbol, position_token = fetch_symbol_token(position_string)
-    position_price = fetchltp('NFO', position_symbol, position_token)
-
     if option_type == 'CE':
         iv = call_implied_volatility(position_price, underlying_price, strike, time_left, 0.05)
         delta = call_delta(underlying_price, strike, time_left, 0.05, iv / 100)
+        gamma = call_gamma(underlying_price, strike, time_left, 0.05, iv / 100)
     elif option_type == 'PE':
         iv = put_implied_volatility(position_price, underlying_price, strike, time_left, 0.05)
         delta = put_delta(underlying_price, strike, time_left, 0.05, iv / 100)
+        gamma = put_gamma(underlying_price, strike, time_left, 0.05, iv / 100)
     else:
         raise Exception('Invalid option type')
 
-    return position_price, iv, delta
-
-
-def place_synthetic_fut(name, strike, expiry, buy_or_sell, quantity, price='MARKET'):
-    """Places a synthetic future order. Quantity is in number of shares."""
-
-    call_symbol, call_token = fetch_symbol_token(f'{name} {strike} {expiry} CE')
-    put_symbol, put_token = fetch_symbol_token(f'{name} {strike} {expiry} PE')
-
-    if buy_or_sell == 'BUY':
-        order_id_call = placeorder(call_symbol, call_token, quantity, 'BUY', 'MARKET')
-        order_id_put = placeorder(put_symbol, put_token, quantity, 'SELL', 'MARKET')
-    elif buy_or_sell == 'SELL':
-        order_id_call = placeorder(call_symbol, call_token, quantity, 'SELL', 'MARKET')
-        order_id_put = placeorder(put_symbol, put_token, quantity, 'BUY', 'MARKET')
-    else:
-        raise Exception('Invalid buy or sell')
-
-    order_statuses = lookup_and_return('orderbook', 'orderid', [order_id_call, order_id_put], 'status')
-
-    if not all(order_statuses == 'complete'):
-        raise Exception('Syntehtic Futs: Orders not completed')
-    else:
-        print(f'Synthetic Futs: {buy_or_sell} Order for {quantity} quantity completed.')
+    return iv, delta, gamma
 
 
 # ORDER FUNCTIONS BELOW #
@@ -532,6 +505,29 @@ def placeSLorder(symbol, token, qty, buyorsell, triggerprice, ordertag=""):
 
     order_id = obj.placeOrder(params)
     return order_id
+
+
+def place_synthetic_fut_order(name, strike, expiry, buy_or_sell, quantity, price='MARKET'):
+    """Places a synthetic future order. Quantity is in number of shares."""
+
+    call_symbol, call_token = fetch_symbol_token(f'{name} {strike} {expiry} CE')
+    put_symbol, put_token = fetch_symbol_token(f'{name} {strike} {expiry} PE')
+
+    if buy_or_sell == 'BUY':
+        order_id_call = placeorder(call_symbol, call_token, quantity, 'BUY', 'MARKET')
+        order_id_put = placeorder(put_symbol, put_token, quantity, 'SELL', 'MARKET')
+    elif buy_or_sell == 'SELL':
+        order_id_call = placeorder(call_symbol, call_token, quantity, 'SELL', 'MARKET')
+        order_id_put = placeorder(put_symbol, put_token, quantity, 'BUY', 'MARKET')
+    else:
+        raise Exception('Invalid buy or sell')
+
+    order_statuses = lookup_and_return('orderbook', 'orderid', [order_id_call, order_id_put], 'status')
+
+    if not all(order_statuses == 'complete'):
+        raise Exception('Syntehtic Futs: Orders not completed')
+    else:
+        print(f'Synthetic Futs: {buy_or_sell} Order for {quantity} quantity completed.')
 
 
 class Index:
@@ -793,6 +789,43 @@ class Index:
                      f'{expiry} {quantity_in_lots} lot(s).', self.webhook_url)
             raise Exception('Order statuses uncertain')
 
+    def place_synthetic_fut_order(self, strike, expiry, buy_or_sell, quantity, price='MARKET'):
+
+        """Places a synthetic future order. Quantity is in number of shares."""
+
+        freeze_qty_in_shares = self.freeze_qty * self.lot_size
+        if quantity > freeze_qty_in_shares:
+            quotient, remainder = divmod(quantity, freeze_qty_in_shares)
+            if quotient > 10:
+                raise Exception('Order too big. This error was raised to prevent accidental large order placement.')
+            spliced_orders = [freeze_qty_in_shares] * quotient + [remainder]
+        else:
+            spliced_orders = [quantity]
+
+        call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {expiry} CE')
+        put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {expiry} PE')
+
+        call_order_id_list = []
+        put_order_id_list = []
+        for quantity in spliced_orders:
+            if buy_or_sell == 'BUY':
+                order_id_call = placeorder(call_symbol, call_token, quantity, 'BUY', 'MARKET')
+                order_id_put = placeorder(put_symbol, put_token, quantity, 'SELL', 'MARKET')
+            elif buy_or_sell == 'SELL':
+                order_id_call = placeorder(call_symbol, call_token, quantity, 'SELL', 'MARKET')
+                order_id_put = placeorder(put_symbol, put_token, quantity, 'BUY', 'MARKET')
+            else:
+                raise Exception('Invalid buy or sell')
+            call_order_id_list.append(order_id_call)
+            put_order_id_list.append(order_id_put)
+
+        order_statuses = lookup_and_return('orderbook', 'orderid', call_order_id_list + put_order_id_list, 'status')
+
+        if not all(order_statuses == 'complete'):
+            raise Exception('Syntehtic Futs: Orders not completed')
+        else:
+            print(f'Synthetic Futs: {buy_or_sell} Order for {quantity} quantity completed.')
+
     def rollover_overnight_short_straddle(self, quantity_in_lots, strike_offset=1):
 
         """Buys the previous day's strike and sells the current strike"""
@@ -860,7 +893,7 @@ class Index:
                                       'BUY', quantity_in_lots, order_tag='Weekly hedge')
 
     def intraday_straddle(self, quantity_in_lots, exit_time=(15, 28), wait_for_equality=False,
-                          monitor_sl=False, **kwargs):
+                          monitor_sl=False, move_sl=False, **kwargs):
 
         """Params:
         quantity_in_lots: Quantity of straddle to trade
@@ -1086,14 +1119,15 @@ class Index:
                             placeorder(call_symbol, call_token, quantity * self.lot_size,
                                        'BUY', 'MARKET')
 
-                    # Cancelling and placing new put sl orders
-                    for orderid in put_stoploss_order_ids:
-                        obj.cancelOrder(orderid, 'STOPLOSS')
-                    put_stoploss_order_ids = []
-                    for quantity in spliced_orders:
-                        put_sl_order_id = placeSLorder(put_symbol, put_token, quantity * self.lot_size,
-                                                       'BUY', put_avg_price, 'Stoploss put')
-                        put_stoploss_order_ids.append(put_sl_order_id)
+                    if move_sl:
+                        # Cancelling and placing new put sl orders
+                        for orderid in put_stoploss_order_ids:
+                            obj.cancelOrder(orderid, 'STOPLOSS')
+                        put_stoploss_order_ids = []
+                        for quantity in spliced_orders:
+                            put_sl_order_id = placeSLorder(put_symbol, put_token, quantity * self.lot_size,
+                                                           'BUY', put_avg_price, 'Stoploss put')
+                            put_stoploss_order_ids.append(put_sl_order_id)
 
                     # Monitoring second stoploss
                     while currenttime().time() < time(*exit_time):
@@ -1119,14 +1153,15 @@ class Index:
                             placeorder(put_symbol, put_token, quantity * self.lot_size,
                                        'BUY', 'MARKET')
 
-                    # Cancelling and placing new put sl orders
-                    for orderid in call_stoploss_order_ids:
-                        obj.cancelOrder(orderid, 'STOPLOSS')
-                    call_stoploss_order_ids = []
-                    for quantity in spliced_orders:
-                        call_sl_order_id = placeSLorder(call_symbol, call_token, quantity * self.lot_size,
-                                                        'BUY', call_avg_price, 'Stoploss call')
-                        call_stoploss_order_ids.append(call_sl_order_id)
+                    if move_sl:
+                        # Cancelling and placing new put sl orders
+                        for orderid in call_stoploss_order_ids:
+                            obj.cancelOrder(orderid, 'STOPLOSS')
+                        call_stoploss_order_ids = []
+                        for quantity in spliced_orders:
+                            call_sl_order_id = placeSLorder(call_symbol, call_token, quantity * self.lot_size,
+                                                            'BUY', call_avg_price, 'Stoploss call')
+                            call_stoploss_order_ids.append(call_sl_order_id)
 
                     # Monitoring second stoploss
                     while currenttime().time() < time(*exit_time):
@@ -1224,6 +1259,161 @@ class Index:
 
         in_trade = False
         sws.close_connection()
+
+    def intraday_straddle_delta_hedged(self, quantity_in_lots, exit_time=(15, 30), wait_for_equality=False, **kwargs):
+
+        def scanner():
+
+            """Scans the market for the best strike to trade"""
+
+            ltp = price_dict.get(self.token, 0)['ltp']
+            current_strike = findstrike(ltp, self.base)
+            strike_range = np.arange(current_strike - self.base * 6, current_strike + self.base * 6, self.base)
+
+            call_token_list = []
+            put_token_list = []
+            call_symbol_list = []
+            put_symbol_list = []
+            strike_list = []
+            for strike in strike_range:
+                call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} CE')
+                put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} PE')
+                call_token_list.append(call_token)
+                put_token_list.append(put_token)
+                call_symbol_list.append(call_symbol)
+                put_symbol_list.append(put_symbol)
+                strike_list.append(strike)
+
+            call_and_put_token_list = call_token_list + put_token_list
+            token_list_subscribe = [{'exchangeType': 2, 'tokens': call_and_put_token_list}]
+            sws.subscribe('websocket', 1, token_list_subscribe)
+            sleep(3)
+
+            # Fetching the last traded prices of different strikes from the global price_dict using token values
+            call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
+            put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
+            disparities = np.abs(call_ltps - put_ltps)/np.minimum(call_ltps, put_ltps)*100
+
+            # If wait_for_equality is True, waits for call and put prices to be equal before selecting a strike
+            if wait_for_equality:
+
+                loop_number = 1
+                while np.min(disparities) > kwargs['target_disparity']:
+                    call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
+                    put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
+                    disparities = np.abs(call_ltps - put_ltps)/np.minimum(call_ltps, put_ltps)*100
+                    if loop_number % 200000 == 0:
+                        print(f'Time: {currenttime().strftime("%H:%M:%S")}\n' +
+                              f'Index: {self.name}\n' +
+                              f'Current lowest disparity: {np.min(disparities):.2f}\n' +
+                              f'Strike: {strike_list[np.argmin(disparities)]}\n')
+                    if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
+                        notifier('Intraday straddle exited due to time limit.', self.webhook_url)
+                        return
+                    loop_number += 1
+
+            # Selecting the strike with the lowest disparity
+            strike_to_trade = strike_list[np.argmin(disparities)]
+            call_symbol = call_symbol_list[np.argmin(disparities)]
+            put_symbol = put_symbol_list[np.argmin(disparities)]
+            call_token = call_token_list[np.argmin(disparities)]
+            put_token = put_token_list[np.argmin(disparities)]
+            call_ltp = call_ltps[np.argmin(disparities)]
+            put_ltp = put_ltps[np.argmin(disparities)]
+
+            # Unsubscribing from the tokens
+            tokens_to_unsubscribe = [token for token in call_and_put_token_list if token not in [call_token, put_token]]
+            token_list_unsubscribe = [{'exchangeType': 2, 'tokens': tokens_to_unsubscribe}]
+            sws.unsubscribe('websocket', 1, token_list_unsubscribe)
+            for token in tokens_to_unsubscribe:
+                del price_dict[token]
+            print(f'{self.name}: Unsubscribed from tokens')
+            return strike_to_trade, call_symbol, put_symbol, call_token, put_token, call_ltp, put_ltp
+
+        equal_strike, call_symbol, put_symbol, call_token, put_token, call_price, put_price = scanner()
+        expiry = self.current_expiry
+        print(f'Index: {self.name}, Strike: {equal_strike}, Call: {call_price}, Put: {put_price}')
+        notifier(f'{self.name}: Initiating intraday trade on {equal_strike} strike.', self.webhook_url)
+
+        # Placing orders
+        self.place_straddle_order(equal_strike, expiry, 'SELL', quantity_in_lots,
+                                  return_avg_price=True, order_tag='Intraday straddle with delta')
+
+        positions = {
+            f'{self.name} {equal_strike} {expiry} CE': {'token': call_token,
+                                                        'quantity': -1 * quantity_in_lots * self.lot_size,
+                                                        'delta_quantity': 0},
+            f'{self.name} {equal_strike} {expiry} PE': {'token': put_token,
+                                                        'quantity': -1 * quantity_in_lots * self.lot_size,
+                                                        'delta_quantity': 0}
+        }
+
+        synthetic_fut_call = f'{self.name} {equal_strike} {expiry} CE'
+        synthetic_fut_put = f'{self.name} {equal_strike} {expiry} PE'
+        delta_threshold = 1 * self.lot_size
+
+        while currenttime().time() < time(*exit_time):
+
+            underlying_price = price_dict.get(self.token, 0)['ltp']
+            position_df = pd.DataFrame(positions).T
+            position_df['ltp'] = position_df['token'].apply(lambda x: price_dict.get(x, 0)['ltp'])
+            position_df[['iv', 'delta', 'gamma']] = position_df.apply(lambda row:
+                                                                      fetch_greeks(row.name, row.ltp,
+                                                                                   underlying_price), axis=1).tolist()
+            position_df['total_quantity'] = position_df['quantity'] + position_df['delta_quantity']
+            position_df['delta'] = position_df.delta * position_df.total_quantity
+            position_df['gamma'] = position_df.gamma * position_df.total_quantity
+            position_df.loc['Total'] = position_df.agg({'delta': 'sum', 'gamma': 'sum',
+                                                        'iv': 'mean', 'ltp': 'mean'})
+            current_delta = position_df.delta.sum()
+
+            print(f'\n**** Starting Loop ****\n{position_df}\nCurrent delta: {current_delta}\n')
+
+            if abs(current_delta) > delta_threshold:
+
+                if current_delta > 0:  # We are long
+                    lots_to_sell = round(abs(current_delta) / self.lot_size, 0)
+                    notifier(f'Delta greater than {delta_threshold}. Selling {lots_to_sell} ' +
+                             f'synthetic futures to reduce delta.\n', self.webhook_url)
+                    place_synthetic_fut_order(self.name, equal_strike, expiry, 'SELL', lots_to_sell * self.lot_size)
+                    positions[synthetic_fut_call]['delta_quantity'] -= lots_to_sell * self.lot_size
+                    positions[synthetic_fut_put]['delta_quantity'] += lots_to_sell * self.lot_size
+
+                else:  # We are short
+                    lots_to_buy = round(abs(current_delta) / self.lot_size, 0)
+                    notifier(f'Delta less than {-delta_threshold}. Buying {lots_to_buy} ' +
+                             f'synthetic futures to reduce delta.\n', self.webhook_url)
+                    place_synthetic_fut_order(self.name, equal_strike, expiry, 'BUY', lots_to_buy * self.lot_size)
+                    positions[synthetic_fut_call]['delta_quantity'] += lots_to_buy * self.lot_size
+                    positions[synthetic_fut_put]['delta_quantity'] -= lots_to_buy * self.lot_size
+
+            sleep(2)
+
+        # Closing the main positions along with the delta positions if any are open
+        notifier(f'Intraday straddle with delta: Closing positions.', self.webhook_url)
+        self.place_straddle_order(equal_strike, expiry, 'BUY', quantity_in_lots,
+                                  order_tag='Intraday straddle with delta')
+
+        # Squaring off the delta positions
+        call_delta_quantity = positions[synthetic_fut_call]['delta_quantity']
+        put_delta_quantity = positions[synthetic_fut_put]['delta_quantity']
+
+        if call_delta_quantity != 0 and put_delta_quantity != 0:
+            assert call_delta_quantity == -1*put_delta_quantity
+            quantity_to_square_up = abs(call_delta_quantity)
+
+            if call_delta_quantity > 0:
+                action = 'BUY'
+            else:
+                action = 'SELL'
+
+            self.place_synthetic_fut_order(equal_strike, expiry, action, quantity_to_square_up)
+            notifier(f'Intraday Butterfly: Squared off delta positions. ' +
+                     f'{action} {quantity_to_square_up} synthetic futures.', self.webhook_url)
+        elif call_delta_quantity == 0 and put_delta_quantity == 0:
+            notifier('No delta positions to square off.', self.webhook_url)
+        else:
+            raise AssertionError('Delta positions are not balanced.')
 
     def rollover_short_butterfly(self, quantity_in_lots, ce_hedge_offset=1.02,
                                  pe_hedge_offset=0.98):
@@ -1342,7 +1532,7 @@ class Index:
             underlying_price = self.fetch_ltp()
             delta_position = pd.DataFrame(delta_position_dict, index=['quantity']).T
             merged_positions = positions.combine(delta_position, lambda x, y: x + y, fill_value=0)
-            merged_positions[['ltp', 'iv', 'delta']] = merged_positions.index.map(fetch_price_iv_delta).to_list()
+            merged_positions[['ltp', 'iv', 'delta']] = merged_positions.index.map(fetch_greeks).to_list()
             merged_positions['delta'] = merged_positions.delta * merged_positions.quantity
             current_delta = merged_positions.delta.sum()
 
@@ -1356,7 +1546,7 @@ class Index:
                     lots_to_sell = round(abs(current_delta) / self.lot_size, 0)
                     notifier(f'Delta greater than {delta_threshold}. Selling {lots_to_sell} ' +
                              f'synthetic futures to reduce delta.\n', self.webhook_url)
-                    place_synthetic_fut(self.name, atm_strike, expiry, 'SELL', lots_to_sell * self.lot_size)
+                    place_synthetic_fut_order(self.name, atm_strike, expiry, 'SELL', lots_to_sell * self.lot_size)
                     delta_position_dict[synthetic_fut_call] += -1 * lots_to_sell * self.lot_size
                     delta_position_dict[synthetic_fut_put] += lots_to_sell * self.lot_size
 
@@ -1364,7 +1554,7 @@ class Index:
                     lots_to_buy = round(abs(current_delta) / self.lot_size, 0)
                     notifier(f'Delta less than {-delta_threshold}. Buying {lots_to_buy} ' +
                              f'synthetic futures to reduce delta.\n', self.webhook_url)
-                    place_synthetic_fut(self.name, atm_strike, expiry, 'BUY', lots_to_buy * self.lot_size)
+                    place_synthetic_fut_order(self.name, atm_strike, expiry, 'BUY', lots_to_buy * self.lot_size)
                     delta_position_dict[synthetic_fut_call] += lots_to_buy * self.lot_size
                     delta_position_dict[synthetic_fut_put] += -1 * lots_to_buy * self.lot_size
 
@@ -1387,7 +1577,7 @@ class Index:
             else:
                 action = 'SELL'
 
-            place_synthetic_fut(self.name, atm_strike, expiry, action, quantity_to_square_up)
+            place_synthetic_fut_order(self.name, atm_strike, expiry, action, quantity_to_square_up)
             notifier(f'Intraday Butterfly: Squared off delta positions. ' +
                      f'{action} {quantity_to_square_up} synthetic futures.', self.webhook_url)
         elif delta_position_dict[synthetic_fut_call] == 0 and delta_position_dict[synthetic_fut_put] == 0:
