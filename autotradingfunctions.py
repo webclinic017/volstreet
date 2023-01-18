@@ -12,6 +12,8 @@ import pyotp
 from threading import Thread
 from SmartWebSocketV2 import SmartWebSocketV2
 
+global scrips, login_data, obj, sws, price_dict
+
 
 def login(user, pin, apikey, authkey, webhook_url=None):
     global obj, login_data
@@ -442,6 +444,7 @@ def fetch_greeks(position_string, position_price, underlying_price):
 # ORDER FUNCTIONS BELOW #
 
 def placeorder(symbol, token, qty, buyorsell, orderprice, ordertag=""):
+
     """Provide symbol, token, qty (shares), buyorsell, orderprice, ordertag (optional)"""
 
     if orderprice == 'MARKET':
@@ -481,11 +484,22 @@ def placeorder(symbol, token, qty, buyorsell, orderprice, ordertag=""):
                   "quantity": int(qty),
                   "ordertag": ordertag}
 
-    order_id = obj.placeOrder(params)
-    return order_id
+    for attempt in range(1, 5):
+
+        try:
+            order_id = obj.placeOrder(params)
+            return order_id
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print(e)
+            print(f'Order attempt {attempt} failed')
+            sleep(2)
+            continue
 
 
 def placeSLorder(symbol, token, qty, buyorsell, triggerprice, ordertag=""):
+
     executionprice = triggerprice * 1.1
 
     params = {"variety": "STOPLOSS",
@@ -503,11 +517,22 @@ def placeSLorder(symbol, token, qty, buyorsell, triggerprice, ordertag=""):
               "quantity": int(qty),
               "ordertag": ordertag}
 
-    order_id = obj.placeOrder(params)
-    return order_id
+    for attempt in range(1, 5):
+
+        try:
+            order_id = obj.placeOrder(params)
+            return order_id
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print(e)
+            print(f'SL order attempt {attempt} failed')
+            sleep(2)
+            continue
 
 
 def place_synthetic_fut_order(name, strike, expiry, buy_or_sell, quantity, price='MARKET'):
+
     """Places a synthetic future order. Quantity is in number of shares."""
 
     call_symbol, call_token = fetch_symbol_token(f'{name} {strike} {expiry} CE')
@@ -1365,9 +1390,11 @@ class Index:
             position_df['gamma'] = position_df.gamma * position_df.total_quantity
             position_df.loc['Total'] = position_df.agg({'delta': 'sum', 'gamma': 'sum',
                                                         'iv': 'mean', 'ltp': 'mean'})
-            current_delta = position_df.delta.sum()
+            current_delta = position_df.loc['Total', 'delta']
+            current_gamma = position_df.loc['Total', 'gamma']
 
-            print(f'\n**** Starting Loop ****\n{position_df}\nCurrent delta: {current_delta}\n')
+            print(f'\n**** Starting Loop ****\n{position_df.drop(["token", "gamma", "iv"], axis=1)}\n' +
+                  f'\nCurrent delta: {current_delta}\n')
 
             if abs(current_delta) > delta_threshold:
 
@@ -1403,12 +1430,12 @@ class Index:
             quantity_to_square_up = abs(call_delta_quantity)
 
             if call_delta_quantity > 0:
-                action = 'BUY'
-            else:
                 action = 'SELL'
+            else:
+                action = 'BUY'
 
             self.place_synthetic_fut_order(equal_strike, expiry, action, quantity_to_square_up)
-            notifier(f'Intraday Butterfly: Squared off delta positions. ' +
+            notifier(f'Intraday Straddle with delta: Squared off delta positions. ' +
                      f'{action} {quantity_to_square_up} synthetic futures.', self.webhook_url)
         elif call_delta_quantity == 0 and put_delta_quantity == 0:
             notifier('No delta positions to square off.', self.webhook_url)
