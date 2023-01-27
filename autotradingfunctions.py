@@ -8,6 +8,7 @@ from time import sleep
 import requests
 import json
 from smartapi import SmartConnect
+from smartapi.smartExceptions import DataException
 import pyotp
 from threading import Thread
 from SmartWebSocketV2 import SmartWebSocketV2
@@ -80,6 +81,12 @@ def start_websocket(exchangetype=1, tokens=None):
         sleep(1)
 
 
+def fetch_price_dict():
+    global price_dict
+    new_price_dict = {scrips.loc[scrips.token == token]['symbol'].values[0]: value for token, value in price_dict.items()}
+    return new_price_dict
+
+
 # Ticker file
 def get_ticker_file():
     global scrips
@@ -104,29 +111,44 @@ def fetch_holidays():
 
 
 def fetch_book(book):
+
     if book == 'orderbook':
         for attempt in range(1, 7):
             try:
                 data = obj.orderBook()['data']
                 return data
-            except:
+            except DataException:
                 if attempt == 6:
                     raise Exception('Failed to fetch orderbook.')
                 else:
-                    print(f'Error no {attempt}. Failed to fetch orderbook. Retrying in 2 seconds.')
                     sleep(2)
+                    continue
+            except Exception as e:
+                if attempt == 6:
+                    raise Exception('Failed to fetch orderbook.')
+                else:
+                    print(f'Error {attempt} in fetching orderbook: {e}')
+                    sleep(2)
+                    continue
 
     elif book == 'positions' or book == 'position':
         for attempt in range(1, 7):
             try:
                 data = obj.position()['data']
                 return data
-            except:
+            except DataException:
                 if attempt == 6:
                     raise Exception('Failed to fetch positions.')
                 else:
-                    print(f'Error no {attempt}. Failed to fetch positions. Retrying in 2 seconds.')
                     sleep(2)
+                    continue
+            except Exception as e:
+                if attempt == 6:
+                    raise Exception('Failed to fetch positions.')
+                else:
+                    print(f'Error {attempt} in fetching positions: {e}')
+                    sleep(2)
+                    continue
 
 
 # Look up and return function for position and orderbook
@@ -169,50 +191,41 @@ def lookup_and_return(book, fieldtolookup, valuetolookup, fieldtoreturn):
 
         for attempt in range(3):
 
-            try:
-                if book == 'orderbook':
-                    if isinstance(valuetolookup, list):
+            if book == 'orderbook':
+                if isinstance(valuetolookup, list):
 
-                        bucket = [order[fieldtoreturn] for order in obj.orderBook()['data']
-                                  if order[fieldtolookup] in valuetolookup and order[fieldtolookup] != '']
-                    elif isinstance(valuetolookup, str):
-                        bucket = [order[fieldtoreturn] for order in obj.orderBook()['data']
-                                  if order[fieldtolookup] == valuetolookup and order[fieldtolookup] != '']
-                    else:
-                        raise ValueError('Invalid valuetolookup')
-
-                elif book == 'positions':
-
-                    if isinstance(valuetolookup, list):
-                        bucket = [order[fieldtoreturn] for order in obj.position()['data']
-                                  if order[fieldtolookup] in valuetolookup and order[fieldtolookup] != '']
-                    elif isinstance(valuetolookup, str):
-                        bucket = [order[fieldtoreturn] for order in obj.position()['data']
-                                  if order[fieldtolookup] == valuetolookup and order[fieldtolookup] != '']
-                    else:
-                        raise ValueError('Invalid valuetolookup')
+                    bucket = [order[fieldtoreturn] for order in fetch_book('orderbook')
+                              if order[fieldtolookup] in valuetolookup and order[fieldtolookup] != '']
+                elif isinstance(valuetolookup, str):
+                    bucket = [order[fieldtoreturn] for order in fetch_book('orderbook')
+                              if order[fieldtolookup] == valuetolookup and order[fieldtolookup] != '']
                 else:
-                    raise ValueError('Invalid dictionary')
+                    raise ValueError('Invalid valuetolookup')
 
-            except Exception as e:
-                if attempt == 2:
-                    print(f'Error in lookup_and_return: {e}')
+            elif book == 'positions':
+
+                if isinstance(valuetolookup, list):
+                    bucket = [order[fieldtoreturn] for order in fetch_book('positions')
+                              if order[fieldtolookup] in valuetolookup and order[fieldtolookup] != '']
+                elif isinstance(valuetolookup, str):
+                    bucket = [order[fieldtoreturn] for order in fetch_book('positions')
+                              if order[fieldtolookup] == valuetolookup and order[fieldtolookup] != '']
                 else:
-                    print(f'Error {attempt} in lookup_and_return: {e}\nRetrying again in 1 second')
-                    sleep(1)
+                    raise ValueError('Invalid valuetolookup')
+            else:
+                raise ValueError('Invalid dictionary')
 
             # Logic for returning
+            if isinstance(valuetolookup, list):
+                assert len(bucket) == len(valuetolookup)
+                return np.array(bucket)
             else:
-                if isinstance(valuetolookup, list):
-                    assert len(bucket) == len(valuetolookup)
-                    return np.array(bucket)
+                if len(bucket) == 0:
+                    return 0
+                elif len(bucket) == 1:
+                    return bucket[0]
                 else:
-                    if len(bucket) == 0:
-                        return 0
-                    elif len(bucket) == 1:
-                        return bucket[0]
-                    else:
-                        return np.array(bucket)
+                    return np.array(bucket)
 
     else:
         raise ValueError('Invalid dictionary')
@@ -284,16 +297,24 @@ def fetch_symbol_token(name):
 
 # LTP function
 def fetchltp(exchange_seg, symbol, token):
-    for attempt in range(3):
+
+    for attempt in range(1,6):
         try:
             price = obj.ltpData(exchange_seg, symbol, token)['data']['ltp']
             return price
-        except Exception as e:
-            if attempt == 2:
-                print(f'Error in fetchltp: {e}')
+        except DataException:
+            if attempt == 5:
+                raise DataException('Failed to fetch LTP')
             else:
-                print(f'Error {attempt} in fetchltp: {e}\nRetrying again in 1 second')
                 sleep(1)
+                continue
+        except Exception as e:
+            if attempt == 5:
+                raise e
+            else:
+                print(f'Error {attempt} in fetching LTP: {e}')
+                sleep(1)
+                continue
 
 
 def fetchpreviousclose(exchange_seg, symbol, token):
@@ -595,6 +616,7 @@ class Index:
         if subscribe_to_ws:
             try:
                 sws.subscribe('websocket', 1, [{'exchangeType': self.exchange_type, 'tokens': [self.token]}])
+                sleep(2)
                 print(f'{self.name}: Subscribed underlying to the websocket')
             except NameError:
                 print('Websocket not initialized. Please initialize the websocket before subscribing to it.')
@@ -917,7 +939,7 @@ class Index:
             self.place_straddle_order(strike, self.next_expiry,
                                       'BUY', quantity_in_lots, order_tag='Weekly hedge')
 
-    def intraday_straddle(self, quantity_in_lots, exit_time=(15, 28), wait_for_equality=False,
+    def intraday_straddle(self, quantity_in_lots, exit_time=(15, 28), websocket=False, wait_for_equality=False,
                           monitor_sl=False, move_sl=False, **kwargs):
 
         """Params:
@@ -937,77 +959,115 @@ class Index:
         else:
             spliced_orders = [quantity_in_lots]
 
-        def scanner():
+        if websocket:
 
-            """Scans the market for the best strike to trade"""
+            def scanner():
 
-            ltp = price_dict.get(self.token, 0)['ltp']
-            current_strike = findstrike(ltp, self.base)
-            strike_range = np.arange(current_strike - self.base * 6, current_strike + self.base * 6, self.base)
+                """Scans the market for the best strike to trade"""
 
-            call_token_list = []
-            put_token_list = []
-            call_symbol_list = []
-            put_symbol_list = []
-            strike_list = []
-            for strike in strike_range:
-                call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} CE')
-                put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} PE')
-                call_token_list.append(call_token)
-                put_token_list.append(put_token)
-                call_symbol_list.append(call_symbol)
-                put_symbol_list.append(put_symbol)
-                strike_list.append(strike)
+                ltp = price_dict.get(self.token, 0)['ltp']
+                current_strike = findstrike(ltp, self.base)
+                strike_range = np.arange(current_strike - self.base * 6, current_strike + self.base * 6, self.base)
 
-            call_and_put_token_list = call_token_list + put_token_list
-            token_list_subscribe = [{'exchangeType': 2, 'tokens': call_and_put_token_list}]
-            sws.subscribe('websocket', 1, token_list_subscribe)
-            sleep(3)
+                call_token_list = []
+                put_token_list = []
+                call_symbol_list = []
+                put_symbol_list = []
+                strike_list = []
+                for strike in strike_range:
+                    call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} CE')
+                    put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} PE')
+                    call_token_list.append(call_token)
+                    put_token_list.append(put_token)
+                    call_symbol_list.append(call_symbol)
+                    put_symbol_list.append(put_symbol)
+                    strike_list.append(strike)
 
-            # Fetching the last traded prices of different strikes from the global price_dict using token values
-            call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
-            put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
-            disparities = np.abs(call_ltps - put_ltps)/np.minimum(call_ltps, put_ltps)*100
+                call_and_put_token_list = call_token_list + put_token_list
+                token_list_subscribe = [{'exchangeType': 2, 'tokens': call_and_put_token_list}]
+                sws.subscribe('websocket', 1, token_list_subscribe)
+                sleep(3)
 
-            # If wait_for_equality is True, waits for call and put prices to be equal before selecting a strike
+                # Fetching the last traded prices of different strikes from the global price_dict using token values
+                call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
+                put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
+                disparities = np.abs(call_ltps - put_ltps)/np.minimum(call_ltps, put_ltps)*100
+
+                # If wait_for_equality is True, waits for call and put prices to be equal before selecting a strike
+                if wait_for_equality:
+
+                    loop_number = 1
+                    while np.min(disparities) > kwargs['target_disparity']:
+                        call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
+                        put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
+                        disparities = np.abs(call_ltps - put_ltps)/np.minimum(call_ltps, put_ltps)*100
+                        if loop_number % 200000 == 0:
+                            print(f'Time: {currenttime().strftime("%H:%M:%S")}\n' +
+                                  f'Index: {self.name}\n' +
+                                  f'Current lowest disparity: {np.min(disparities):.2f}\n' +
+                                  f'Strike: {strike_list[np.argmin(disparities)]}\n')
+                        if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
+                            notifier('Intraday straddle exited due to time limit.', self.webhook_url)
+                            return
+                        loop_number += 1
+
+                # Selecting the strike with the lowest disparity
+                strike_to_trade = strike_list[np.argmin(disparities)]
+                call_symbol = call_symbol_list[np.argmin(disparities)]
+                put_symbol = put_symbol_list[np.argmin(disparities)]
+                call_token = call_token_list[np.argmin(disparities)]
+                put_token = put_token_list[np.argmin(disparities)]
+                call_ltp = call_ltps[np.argmin(disparities)]
+                put_ltp = put_ltps[np.argmin(disparities)]
+
+                # Unsubscribing from the tokens
+                tokens_to_unsubscribe = [token for token in call_and_put_token_list if token not in [call_token, put_token]]
+                token_list_unsubscribe = [{'exchangeType': 2, 'tokens': tokens_to_unsubscribe}]
+                sws.unsubscribe('websocket', 1, token_list_unsubscribe)
+                for token in tokens_to_unsubscribe:
+                    del price_dict[token]
+                print(f'{self.name}: Unsubscribed from tokens')
+                return strike_to_trade, call_symbol, put_symbol, call_token, put_token, call_ltp, put_ltp
+
+            equal_strike, call_symbol, put_symbol, call_token, put_token, call_price, put_price = scanner()
+
+        else:
+
+            def fetch_disparity_dict():
+
+                ltp = self.fetch_ltp()
+                current_strike = findstrike(ltp, self.base)
+                if self.name == 'FINNIFTY':
+                    strike_range = np.arange(current_strike - self.base * 3, current_strike + self.base * 3, self.base)
+                else:
+                    strike_range = np.arange(current_strike - self.base, current_strike + self.base * 2, self.base)
+                disparity_dict = {}
+                for strike in strike_range:
+                    call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} CE')
+                    put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} PE')
+                    call_price = fetchltp('NFO', call_symbol, call_token)
+                    put_price = fetchltp('NFO', put_symbol, put_token)
+                    disparity = abs(call_price - put_price) / min(call_price, put_price) * 100
+                    disparity_dict[strike] = disparity, call_symbol, call_token, \
+                        put_symbol, put_token, call_price, put_price
+                return disparity_dict
+
+            disparities = fetch_disparity_dict()
             if wait_for_equality:
 
-                loop_number = 1
-                while np.min(disparities) > kwargs['target_disparity']:
-                    call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
-                    put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
-                    disparities = np.abs(call_ltps - put_ltps)/np.minimum(call_ltps, put_ltps)*100
-                    if loop_number % 200000 == 0:
-                        print(f'Time: {currenttime().strftime("%H:%M:%S")}\n' +
-                              f'Index: {self.name}\n' +
-                              f'Current lowest disparity: {np.min(disparities):.2f}\n' +
-                              f'Strike: {strike_list[np.argmin(disparities)]}\n')
+                while min(disparities.values())[0] > kwargs['target_disparity']:
+                    disparities = fetch_disparity_dict()
+                    string = '\n'.join([f'{strike}: {disp:.2f}' for strike, (disp, *_) in disparities.items()])
+                    print(f'{self.name} current disparities:\n{string}')
                     if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
                         notifier('Intraday straddle exited due to time limit.', self.webhook_url)
                         return
-                    loop_number += 1
 
-            # Selecting the strike with the lowest disparity
-            strike_to_trade = strike_list[np.argmin(disparities)]
-            call_symbol = call_symbol_list[np.argmin(disparities)]
-            put_symbol = put_symbol_list[np.argmin(disparities)]
-            call_token = call_token_list[np.argmin(disparities)]
-            put_token = put_token_list[np.argmin(disparities)]
-            call_ltp = call_ltps[np.argmin(disparities)]
-            put_ltp = put_ltps[np.argmin(disparities)]
+            equal_strike = min(disparities, key=disparities.get)
+            disparity, call_symbol, call_token, put_symbol, put_token, call_price, put_price = disparities[equal_strike]
 
-            # Unsubscribing from the tokens
-            tokens_to_unsubscribe = [token for token in call_and_put_token_list if token not in [call_token, put_token]]
-            token_list_unsubscribe = [{'exchangeType': 2, 'tokens': tokens_to_unsubscribe}]
-            sws.unsubscribe('websocket', 1, token_list_unsubscribe)
-            for token in tokens_to_unsubscribe:
-                del price_dict[token]
-            print(f'{self.name}: Unsubscribed from tokens')
-            return strike_to_trade, call_symbol, put_symbol, call_token, put_token, call_ltp, put_ltp
-
-        equal_strike, call_symbol, put_symbol, call_token, put_token, call_price, put_price = scanner()
         expiry = self.current_expiry
-        #print(f'Index: {self.name}, Strike: {equal_strike}, Call: {call_price}, Put: {put_price}')
+        # print(f'Index: {self.name}, Strike: {equal_strike}, Call: {call_price}, Put: {put_price}')
         notifier(f'{self.name}: Initiating intraday trade on {equal_strike} strike.', self.webhook_url)
 
         # Placing orders
@@ -1058,13 +1118,18 @@ class Index:
             nonlocal call_price, put_price
             loop_number = 0
             while in_trade:
-                underlying_price = price_dict.get(self.token, 0)['ltp']
-                call_price = price_dict.get(call_token, 0)['ltp']
-                put_price = price_dict.get(put_token, 0)['ltp']
+                if websocket:
+                    underlying_price = price_dict.get(self.token, 0)['ltp']
+                    call_price = price_dict.get(call_token, 0)['ltp']
+                    put_price = price_dict.get(put_token, 0)['ltp']
+                else:
+                    underlying_price = self.fetch_ltp()
+                    call_price = fetchltp('NFO', call_symbol, call_token)
+                    put_price = fetchltp('NFO', put_symbol, put_token)
                 iv = straddleiv(call_price, put_price, underlying_price, equal_strike, timetoexpiry(expiry))
-
-                if loop_number % 100 == 0:
+                if loop_number % 25 == 0:
                     print(f'Index: {self.name}\nTime: {currenttime().time()}\nStrike: {equal_strike}\n' +
+                          f'Call SL: {call_sl_hit}\nPut SL: {put_sl_hit}' +
                           f'Call Price: {call_price}\nPut Price: {put_price}\n' +
                           f'Total price: {call_price + put_price}\nIV: {iv}\n')
                 loop_number += 1
@@ -1166,7 +1231,7 @@ class Index:
                                                'BUY', 'MARKET')
                             break
                         else:
-                            print(f'{self.name} put stoploss not triggered yet')
+                            # print(f'{self.name} put stoploss not triggered yet')
                             sleep(5)
 
                 elif put_sl_hit:
@@ -1200,11 +1265,11 @@ class Index:
                                                'BUY', 'MARKET')
                             break
                         else:
-                            print(f'{self.name} call stoploss not triggered yet')
+                            # print(f'{self.name} call stoploss not triggered yet')
                             sleep(5)
                 else:
                     current_time = currenttime().time().strftime('%H:%M:%S')
-                    print(f'{current_time} {self.name} stoplosses not triggered')
+                    # print(f'{current_time} {self.name} stoplosses not triggered')
                     sleep(5)
 
         else:
@@ -1283,9 +1348,11 @@ class Index:
         self.order_list[0]['Stoploss'] = self.stoploss
 
         in_trade = False
-        sws.close_connection()
+        if websocket:
+            sws.close_connection()
 
-    def intraday_straddle_delta_hedged(self, quantity_in_lots, exit_time=(15, 30), wait_for_equality=False, **kwargs):
+    def intraday_straddle_delta_hedged(self, quantity_in_lots, exit_time=(15, 30), wait_for_equality=False,
+                                       delta_threshold=1, **kwargs):
 
         def scanner():
 
@@ -1375,7 +1442,7 @@ class Index:
 
         synthetic_fut_call = f'{self.name} {equal_strike} {expiry} CE'
         synthetic_fut_put = f'{self.name} {equal_strike} {expiry} PE'
-        delta_threshold = 1 * self.lot_size
+        delta_threshold = delta_threshold * self.lot_size
 
         while currenttime().time() < time(*exit_time):
 
@@ -1393,7 +1460,7 @@ class Index:
             current_delta = position_df.loc['Total', 'delta']
             current_gamma = position_df.loc['Total', 'gamma']
 
-            print(f'\n**** Starting Loop ****\n{position_df.drop(["token", "gamma", "iv"], axis=1)}\n' +
+            print(f'\n**** Starting Loop ****\n{position_df.drop(["token"], axis=1).to_string()}\n' +
                   f'\nCurrent delta: {current_delta}\n')
 
             if abs(current_delta) > delta_threshold:
