@@ -699,7 +699,10 @@ class Index:
                 raise Exception('Order too big. This error was raised to prevent accidental large order placement.')
 
             remainder = quantity_in_lots % self.freeze_qty
-            spliced_orders = [self.freeze_qty] * loops + [remainder]
+            if remainder == 0:
+                spliced_orders = [self.freeze_qty] * loops
+            else:
+                spliced_orders = [self.freeze_qty] * loops + [remainder]
         else:
             spliced_orders = [quantity_in_lots]
 
@@ -781,7 +784,10 @@ class Index:
                 raise Exception('Order too big. This error was raised to prevent accidental large order placement.')
 
             remainder = quantity_in_lots % self.freeze_qty
-            spliced_orders = [self.freeze_qty] * loops + [remainder]
+            if remainder == 0:
+                spliced_orders = [self.freeze_qty] * loops
+            else:
+                spliced_orders = [self.freeze_qty] * loops + [remainder]
         else:
             spliced_orders = [quantity_in_lots]
 
@@ -845,7 +851,10 @@ class Index:
             quotient, remainder = divmod(quantity, freeze_qty_in_shares)
             if quotient > 10:
                 raise Exception('Order too big. This error was raised to prevent accidental large order placement.')
-            spliced_orders = [freeze_qty_in_shares] * quotient + [remainder]
+            if remainder == 0:
+                spliced_orders = [self.freeze_qty] * quotient
+            else:
+                spliced_orders = [self.freeze_qty] * quotient + [remainder]
         else:
             spliced_orders = [quantity]
 
@@ -955,7 +964,10 @@ class Index:
             if loops > 10:
                 raise Exception('Order too big. This error was raised to prevent accidental large order placement.')
             remainder = quantity_in_lots % self.freeze_qty
-            spliced_orders = [self.freeze_qty] * loops + [remainder]
+            if remainder == 0:
+                spliced_orders = [self.freeze_qty] * loops
+            else:
+                spliced_orders = [self.freeze_qty] * loops + [remainder]
         else:
             spliced_orders = [quantity_in_lots]
 
