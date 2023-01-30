@@ -979,7 +979,7 @@ class Index:
 
                 ltp = price_dict.get(self.token, 0)['ltp']
                 current_strike = findstrike(ltp, self.base)
-                strike_range = np.arange(current_strike - self.base * 6, current_strike + self.base * 6, self.base)
+                strike_range = np.arange(current_strike - self.base * 2, current_strike + self.base * 2, self.base)
 
                 call_token_list = []
                 put_token_list = []
@@ -1020,7 +1020,7 @@ class Index:
                                   f'Strike: {strike_list[np.argmin(disparities)]}\n')
                         if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
                             notifier('Intraday straddle exited due to time limit.', self.webhook_url)
-                            return
+                            raise Exception('Intraday straddle exited due to time limit.')
                         loop_number += 1
 
                 # Selecting the strike with the lowest disparity
@@ -1050,7 +1050,7 @@ class Index:
                 ltp = self.fetch_ltp()
                 current_strike = findstrike(ltp, self.base)
                 if self.name == 'FINNIFTY':
-                    strike_range = np.arange(current_strike - self.base * 3, current_strike + self.base * 3, self.base)
+                    strike_range = np.arange(current_strike - self.base * 2, current_strike + self.base * 2, self.base)
                 else:
                     strike_range = np.arange(current_strike - self.base, current_strike + self.base * 2, self.base)
                 disparity_dict = {}
@@ -1073,7 +1073,7 @@ class Index:
                     print(f'{self.name} current disparities:\n{string}')
                     if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
                         notifier('Intraday straddle exited due to time limit.', self.webhook_url)
-                        return
+                        raise Exception('Intraday straddle exited due to time limit.')
 
             equal_strike = min(disparities, key=disparities.get)
             disparity, call_symbol, call_token, put_symbol, put_token, call_price, put_price = disparities[equal_strike]
@@ -1141,7 +1141,7 @@ class Index:
                 iv = straddleiv(call_price, put_price, underlying_price, equal_strike, timetoexpiry(expiry))
                 if loop_number % 25 == 0:
                     print(f'Index: {self.name}\nTime: {currenttime().time()}\nStrike: {equal_strike}\n' +
-                          f'Call SL: {call_sl_hit}\nPut SL: {put_sl_hit}' +
+                          f'Call SL: {call_sl_hit}\nPut SL: {put_sl_hit}\n' +
                           f'Call Price: {call_price}\nPut Price: {put_price}\n' +
                           f'Total price: {call_price + put_price}\nIV: {iv}\n')
                 loop_number += 1
