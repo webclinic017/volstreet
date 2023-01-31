@@ -505,16 +505,17 @@ def placeorder(symbol, token, qty, buyorsell, orderprice, ordertag=""):
                   "quantity": int(qty),
                   "ordertag": ordertag}
 
-    for attempt in range(1, 5):
+    for attempt in range(1, 6):
 
         try:
             order_id = obj.placeOrder(params)
             return order_id
         except KeyboardInterrupt:
-            raise
+            raise KeyboardInterrupt
         except Exception as e:
-            print(e)
-            print(f'Order attempt {attempt} failed')
+            if attempt == 5:
+                raise e
+            print(f'Error {attempt} in placing order for {symbol}: {e}')
             sleep(2)
             continue
 
@@ -538,16 +539,17 @@ def placeSLorder(symbol, token, qty, buyorsell, triggerprice, ordertag=""):
               "quantity": int(qty),
               "ordertag": ordertag}
 
-    for attempt in range(1, 5):
+    for attempt in range(1, 6):
 
         try:
             order_id = obj.placeOrder(params)
             return order_id
         except KeyboardInterrupt:
-            raise
+            raise KeyboardInterrupt
         except Exception as e:
-            print(e)
-            print(f'SL order attempt {attempt} failed')
+            if attempt == 5:
+                raise e
+            print(f'Error {attempt} in placing SL order for {symbol}: {e}')
             sleep(2)
             continue
 
@@ -952,12 +954,14 @@ class Index:
                           monitor_sl=False, move_sl=False, **kwargs):
 
         """Params:
-        quantity_in_lots: Quantity of straddle to trade
-        exit_time: Time to exit the trade
-        wait_for_equality: If True, waits for call and put prices to be equal before placing orders
-        monitor_sl: If True, monitors stop loss and moves sl to cost on the other leg if one leg is hit
-        kwargs: 'target_disparity', 'stoploss'
-        """
+        quantity_in_lots: Quantity in lots
+        exit_time: Time to exit the trade in (hours, minutes, seconds) format | Default: (15, 28)
+        websocket: Whether to use websocket or not | Default: False
+        wait_for_equality: Whether to wait for the option prices to be equal | Default: False
+        monitor_sl: Whether to monitor stop loss | Default: False
+        move_sl: Whether to move stop loss | Default: False
+        kwargs: 'stoploss': Stop loss  | Default: 1.5 and 1.7 on expiries, 'target_disparity':
+        Target disparity"""
 
         if quantity_in_lots > self.freeze_qty:
             loops = int(quantity_in_lots / self.freeze_qty)
@@ -1147,9 +1151,10 @@ class Index:
                 loop_number += 1
 
         price_updater = Thread(target=price_tracker)
-        price_updater.start()
 
         if monitor_sl:
+
+            price_updater.start()
 
             def check_sl_orders(order_ids, side):
 
@@ -1207,6 +1212,7 @@ class Index:
                     notifier(f'{self.name} {side} stoploss orders in unknown state.', self.webhook_url)
                     raise Exception(f'{side} stoploss orders in unknown state.')
 
+            # Monitoring begins here
             while currenttime().time() < time(*exit_time) and not call_sl_hit and not put_sl_hit:
 
                 call_sl_hit, call_sl_orders_complete = check_sl_orders(call_stoploss_order_ids, 'call')
