@@ -505,7 +505,7 @@ def placeorder(symbol, token, qty, buyorsell, orderprice, ordertag=""):
                   "quantity": int(qty),
                   "ordertag": ordertag}
 
-    for attempt in range(1, 6):
+    for attempt in range(1, 4):
 
         try:
             order_id = obj.placeOrder(params)
@@ -513,7 +513,7 @@ def placeorder(symbol, token, qty, buyorsell, orderprice, ordertag=""):
         except KeyboardInterrupt:
             raise KeyboardInterrupt
         except Exception as e:
-            if attempt == 5:
+            if attempt == 3:
                 raise e
             print(f'Error {attempt} in placing order for {symbol}: {e}')
             sleep(2)
@@ -539,7 +539,7 @@ def placeSLorder(symbol, token, qty, buyorsell, triggerprice, ordertag=""):
               "quantity": int(qty),
               "ordertag": ordertag}
 
-    for attempt in range(1, 6):
+    for attempt in range(1, 4):
 
         try:
             order_id = obj.placeOrder(params)
@@ -547,7 +547,7 @@ def placeSLorder(symbol, token, qty, buyorsell, triggerprice, ordertag=""):
         except KeyboardInterrupt:
             raise KeyboardInterrupt
         except Exception as e:
-            if attempt == 5:
+            if attempt == 3:
                 raise e
             print(f'Error {attempt} in placing SL order for {symbol}: {e}')
             sleep(2)
