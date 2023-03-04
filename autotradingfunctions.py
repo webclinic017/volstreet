@@ -2,8 +2,6 @@ import urllib
 import pandas as pd
 import numpy as np
 from datetime import datetime, time, timedelta
-from math import exp, log, sqrt
-from scipy.stats import norm
 from time import sleep
 import requests
 import json
@@ -12,6 +10,7 @@ from smartapi.smartExceptions import DataException
 import pyotp
 from threading import Thread
 from SmartWebSocketV2 import SmartWebSocketV2
+import blackscholes as bs
 
 global scrips, login_data, obj, sws, price_dict
 
@@ -367,64 +366,6 @@ def findstrike(x, base):
     return base * round(x / base)
 
 
-# BLACK SCHOLES BELOW #
-
-def d1(S, K, T, r, sigma):
-    return (log(S / K) + (r + sigma ** 2 / 2.) * T) / (sigma * sqrt(T))
-
-
-def d2(S, K, T, r, sigma):
-    return d1(S, K, T, r, sigma) - sigma * sqrt(T)
-
-
-def bs_call(S, K, T, r, sigma):
-    return S * norm.cdf(d1(S, K, T, r, sigma)) - K * exp(-r * T) * norm.cdf(d2(S, K, T, r, sigma))
-
-
-def bs_put(S, K, T, r, sigma):
-    return K * exp(-r * T) - S * bs_call(S, K, T, r, sigma)
-
-
-def call_implied_volatility(Price, S, K, T, r):
-    sigma = 0.001
-    while sigma < 1:
-        Price_implied = S * \
-                        norm.cdf(d1(S, K, T, r, sigma)) - K * exp(-r * T) * \
-                        norm.cdf(d2(S, K, T, r, sigma))
-        if Price - Price_implied < 0.01:
-            return sigma * 100
-        sigma += 0.001
-    return 100
-
-
-def put_implied_volatility(Price, S, K, T, r):
-    sigma = 0.001
-    while sigma < 1:
-        Price_implied = K * exp(-r * T) - S + bs_call(S, K, T, r, sigma)
-        if Price - Price_implied < 0.01:
-            return sigma * 100
-        sigma += 0.001
-    return 100
-
-
-def call_delta(S, K, T, r, sigma):
-    delta = norm.cdf(d1(S, K, T, r, sigma))
-    return round(delta, 5)
-
-
-def call_gamma(S, K, T, r, sigma):
-    gamma = norm.pdf(d1(S, K, T, r, sigma)) / (S * sigma * sqrt(T))
-    return round(gamma, 5)
-
-
-def put_delta(S, K, T, r, sigma):
-    return -norm.cdf(-d1(S, K, T, r, sigma))
-
-
-def put_gamma(S, K, T, r, sigma):
-    return norm.pdf(d1(S, K, T, r, sigma)) / (S * sigma * sqrt(T))
-
-
 def timetoexpiry(expiry):
     """Return time left to expiry"""
     time_to_expiry = ((datetime.strptime(expiry, '%d%b%y') + pd.DateOffset(minutes=930)) - currenttime()) / timedelta(
@@ -433,14 +374,15 @@ def timetoexpiry(expiry):
 
 
 def straddleiv(callprice, putprice, spot, strike, timeleft):
-    call_iv = call_implied_volatility(callprice, spot, strike, timeleft, 0.05)
-    put_iv = put_implied_volatility(putprice, spot, strike, timeleft, 0.05)
-    avg_iv = (call_iv + put_iv) / 2
+
+    call_iv = bs.implied_volatility(callprice, spot, strike, timeleft, 0.05, 'c')
+    put_iv = bs.implied_volatility(putprice, spot, strike, timeleft, 0.05, 'p')
+    avg_iv = (call_iv + put_iv) / 2 * 100
 
     return round(avg_iv, 2)
 
 
-def fetch_greeks(position_string, position_price, underlying_price):
+def calc_greeks(position_string, position_price, underlying_price):
 
     """Fetches the price, iv and delta of a stock"""
 
@@ -448,16 +390,9 @@ def fetch_greeks(position_string, position_price, underlying_price):
     strike = int(strike)
     time_left = timetoexpiry(expiry)
 
-    if option_type == 'CE':
-        iv = call_implied_volatility(position_price, underlying_price, strike, time_left, 0.05)
-        delta = call_delta(underlying_price, strike, time_left, 0.05, iv / 100)
-        gamma = call_gamma(underlying_price, strike, time_left, 0.05, iv / 100)
-    elif option_type == 'PE':
-        iv = put_implied_volatility(position_price, underlying_price, strike, time_left, 0.05)
-        delta = put_delta(underlying_price, strike, time_left, 0.05, iv / 100)
-        gamma = put_gamma(underlying_price, strike, time_left, 0.05, iv / 100)
-    else:
-        raise Exception('Invalid option type')
+    iv = bs.implied_volatility(position_price, underlying_price, strike, time_left, 0.05, option_type)*100
+    delta = bs.delta(underlying_price, strike, time_left, 0.05, iv, option_type)
+    gamma = bs.gamma(underlying_price, strike, time_left, 0.05, iv)
 
     return iv, delta, gamma
 
@@ -883,6 +818,115 @@ class Index:
             raise Exception('Syntehtic Futs: Orders not completed')
         else:
             print(f'Synthetic Futs: {buy_or_sell} Order for {quantity} quantity completed.')
+
+    def find_equal_strike(self, exit_time, websocket, wait_for_equality, **kwargs):
+
+        """Scans the market for the best strike to trade"""
+
+        if websocket:
+
+            ltp = price_dict.get(self.token, 0)['ltp']
+            current_strike = findstrike(ltp, self.base)
+            strike_range = np.arange(current_strike - self.base * 2, current_strike + self.base * 2, self.base)
+
+            call_token_list = []
+            put_token_list = []
+            call_symbol_list = []
+            put_symbol_list = []
+            strike_list = []
+
+            for strike in strike_range:
+                call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} CE')
+                put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} PE')
+                call_token_list.append(call_token)
+                put_token_list.append(put_token)
+                call_symbol_list.append(call_symbol)
+                put_symbol_list.append(put_symbol)
+                strike_list.append(strike)
+
+            call_and_put_token_list = call_token_list + put_token_list
+            token_list_subscribe = [{'exchangeType': 2, 'tokens': call_and_put_token_list}]
+            sws.subscribe('websocket', 1, token_list_subscribe)
+            sleep(3)
+
+            # Fetching the last traded prices of different strikes from the global price_dict using token values
+            call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
+            put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
+            disparities = np.abs(call_ltps - put_ltps) / np.minimum(call_ltps, put_ltps) * 100
+
+            # If wait_for_equality is True, waits for call and put prices to be equal before selecting a strike
+            if wait_for_equality:
+
+                loop_number = 1
+                while np.min(disparities) > kwargs['target_disparity']:
+                    call_ltps = np.array(
+                        [price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
+                    put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
+                    disparities = np.abs(call_ltps - put_ltps) / np.minimum(call_ltps, put_ltps) * 100
+                    if loop_number % 200000 == 0:
+                        print(f'Time: {currenttime().strftime("%H:%M:%S")}\n' +
+                              f'Index: {self.name}\n' +
+                              f'Current lowest disparity: {np.min(disparities):.2f}\n' +
+                              f'Strike: {strike_list[np.argmin(disparities)]}\n')
+                    if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
+                        notifier('Intraday straddle exited due to time limit.', self.webhook_url)
+                        raise Exception('Intraday straddle exited due to time limit.')
+                    loop_number += 1
+
+            # Selecting the strike with the lowest disparity
+            strike_to_trade = strike_list[np.argmin(disparities)]
+            call_symbol = call_symbol_list[np.argmin(disparities)]
+            put_symbol = put_symbol_list[np.argmin(disparities)]
+            call_token = call_token_list[np.argmin(disparities)]
+            put_token = put_token_list[np.argmin(disparities)]
+            call_ltp = call_ltps[np.argmin(disparities)]
+            put_ltp = put_ltps[np.argmin(disparities)]
+
+            # Unsubscribing from the tokens
+            tokens_to_unsubscribe = [token for token in call_and_put_token_list if token not in [call_token, put_token]]
+            token_list_unsubscribe = [{'exchangeType': 2, 'tokens': tokens_to_unsubscribe}]
+            sws.unsubscribe('websocket', 1, token_list_unsubscribe)
+            for token in tokens_to_unsubscribe:
+                del price_dict[token]
+            print(f'{self.name}: Unsubscribed from tokens')
+            return strike_to_trade, call_symbol, put_symbol, call_token, put_token, call_ltp, put_ltp
+
+        else:
+
+            ltp = self.fetch_ltp()
+            current_strike = findstrike(ltp, self.base)
+            if self.name == 'FINNIFTY':
+                strike_range = np.arange(current_strike - self.base * 2, current_strike + self.base * 2, self.base)
+            else:
+                strike_range = np.arange(current_strike - self.base, current_strike + self.base * 2, self.base)
+            disparity_dict = {}
+            for strike in strike_range:
+                call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} CE')
+                put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} PE')
+                call_price = fetchltp('NFO', call_symbol, call_token)
+                put_price = fetchltp('NFO', put_symbol, put_token)
+                disparity = abs(call_price - put_price) / min(call_price, put_price) * 100
+                disparity_dict[strike] = disparity, call_symbol, call_token, \
+                    put_symbol, put_token, call_price, put_price
+
+            if wait_for_equality:
+
+                while min(disparity_dict.values())[0] > kwargs['target_disparity']:
+                    for strike in strike_range:
+                        call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} CE')
+                        put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} PE')
+                        call_price = fetchltp('NFO', call_symbol, call_token)
+                        put_price = fetchltp('NFO', put_symbol, put_token)
+                        disparity = abs(call_price - put_price) / min(call_price, put_price) * 100
+                        disparity_dict[strike] = disparity, call_symbol, call_token, \
+                            put_symbol, put_token, call_price, put_price
+                    if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
+                        notifier('Intraday straddle exited due to time limit.', self.webhook_url)
+                        raise Exception('Intraday straddle exited due to time limit.')
+
+            strike_to_trade = min(disparity_dict, key=disparity_dict.get)
+            call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp = disparity_dict[strike_to_trade][1:]
+            return strike_to_trade, call_symbol, put_symbol, call_token, put_token, call_ltp, put_ltp
 
     def rollover_overnight_short_straddle(self, quantity_in_lots, strike_offset=1):
 
@@ -1369,78 +1413,12 @@ class Index:
         if websocket:
             sws.close_connection()
 
-    def intraday_straddle_delta_hedged(self, quantity_in_lots, exit_time=(15, 30), wait_for_equality=False,
-                                       delta_threshold=1, **kwargs):
+    def intraday_straddle_delta_hedged(self, quantity_in_lots, exit_time=(15, 30), websocket=False,
+                                       wait_for_equality=False, delta_threshold=1, **kwargs):
 
-        def scanner():
-
-            """Scans the market for the best strike to trade"""
-
-            ltp = price_dict.get(self.token, 0)['ltp']
-            current_strike = findstrike(ltp, self.base)
-            strike_range = np.arange(current_strike - self.base * 6, current_strike + self.base * 6, self.base)
-
-            call_token_list = []
-            put_token_list = []
-            call_symbol_list = []
-            put_symbol_list = []
-            strike_list = []
-            for strike in strike_range:
-                call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} CE')
-                put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} PE')
-                call_token_list.append(call_token)
-                put_token_list.append(put_token)
-                call_symbol_list.append(call_symbol)
-                put_symbol_list.append(put_symbol)
-                strike_list.append(strike)
-
-            call_and_put_token_list = call_token_list + put_token_list
-            token_list_subscribe = [{'exchangeType': 2, 'tokens': call_and_put_token_list}]
-            sws.subscribe('websocket', 1, token_list_subscribe)
-            sleep(3)
-
-            # Fetching the last traded prices of different strikes from the global price_dict using token values
-            call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
-            put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
-            disparities = np.abs(call_ltps - put_ltps)/np.minimum(call_ltps, put_ltps)*100
-
-            # If wait_for_equality is True, waits for call and put prices to be equal before selecting a strike
-            if wait_for_equality:
-
-                loop_number = 1
-                while np.min(disparities) > kwargs['target_disparity']:
-                    call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
-                    put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
-                    disparities = np.abs(call_ltps - put_ltps)/np.minimum(call_ltps, put_ltps)*100
-                    if loop_number % 200000 == 0:
-                        print(f'Time: {currenttime().strftime("%H:%M:%S")}\n' +
-                              f'Index: {self.name}\n' +
-                              f'Current lowest disparity: {np.min(disparities):.2f}\n' +
-                              f'Strike: {strike_list[np.argmin(disparities)]}\n')
-                    if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
-                        notifier('Intraday straddle exited due to time limit.', self.webhook_url)
-                        return
-                    loop_number += 1
-
-            # Selecting the strike with the lowest disparity
-            strike_to_trade = strike_list[np.argmin(disparities)]
-            call_symbol = call_symbol_list[np.argmin(disparities)]
-            put_symbol = put_symbol_list[np.argmin(disparities)]
-            call_token = call_token_list[np.argmin(disparities)]
-            put_token = put_token_list[np.argmin(disparities)]
-            call_ltp = call_ltps[np.argmin(disparities)]
-            put_ltp = put_ltps[np.argmin(disparities)]
-
-            # Unsubscribing from the tokens
-            tokens_to_unsubscribe = [token for token in call_and_put_token_list if token not in [call_token, put_token]]
-            token_list_unsubscribe = [{'exchangeType': 2, 'tokens': tokens_to_unsubscribe}]
-            sws.unsubscribe('websocket', 1, token_list_unsubscribe)
-            for token in tokens_to_unsubscribe:
-                del price_dict[token]
-            print(f'{self.name}: Unsubscribed from tokens')
-            return strike_to_trade, call_symbol, put_symbol, call_token, put_token, call_ltp, put_ltp
-
-        equal_strike, call_symbol, put_symbol, call_token, put_token, call_price, put_price = scanner()
+        # Finding equal strike
+        equal_strike, call_symbol, put_symbol, call_token, put_token, \
+            call_price, put_price = self.find_equal_strike(exit_time, websocket, wait_for_equality, **kwargs)
         expiry = self.current_expiry
         print(f'Index: {self.name}, Strike: {equal_strike}, Call: {call_price}, Put: {put_price}')
         notifier(f'{self.name}: Initiating intraday trade on {equal_strike} strike.', self.webhook_url)
@@ -1450,6 +1428,7 @@ class Index:
                                   return_avg_price=True, order_tag='Intraday straddle with delta')
 
         positions = {
+
             f'{self.name} {equal_strike} {expiry} CE': {'token': call_token,
                                                         'quantity': -1 * quantity_in_lots * self.lot_size,
                                                         'delta_quantity': 0},
@@ -1464,12 +1443,18 @@ class Index:
 
         while currenttime().time() < time(*exit_time):
 
-            underlying_price = price_dict.get(self.token, 0)['ltp']
             position_df = pd.DataFrame(positions).T
-            position_df['ltp'] = position_df['token'].apply(lambda x: price_dict.get(x, 0)['ltp'])
+            if websocket:
+                underlying_price = price_dict.get(self.token, 0)['ltp']
+                position_df['ltp'] = position_df['token'].apply(lambda x: price_dict.get(x, 'None')['ltp'])
+            else:
+                underlying_price = self.fetch_ltp()
+                position_df['ltp'] = position_df.index.map(lambda x: fetchltp('NFO', *fetch_symbol_token(x)))
+
             position_df[['iv', 'delta', 'gamma']] = position_df.apply(lambda row:
-                                                                      fetch_greeks(row.name, row.ltp,
-                                                                                   underlying_price), axis=1).tolist()
+                                                                      calc_greeks(row.name, row.ltp, underlying_price),
+                                                                      axis=1).tolist()
+
             position_df['total_quantity'] = position_df['quantity'] + position_df['delta_quantity']
             position_df['delta'] = position_df.delta * position_df.total_quantity
             position_df['gamma'] = position_df.gamma * position_df.total_quantity
@@ -1644,7 +1629,7 @@ class Index:
             underlying_price = self.fetch_ltp()
             delta_position = pd.DataFrame(delta_position_dict, index=['quantity']).T
             merged_positions = positions.combine(delta_position, lambda x, y: x + y, fill_value=0)
-            merged_positions[['ltp', 'iv', 'delta']] = merged_positions.index.map(fetch_greeks).to_list()
+            merged_positions[['ltp', 'iv', 'delta']] = merged_positions.index.map(calc_greeks).to_list()
             merged_positions['delta'] = merged_positions.delta * merged_positions.quantity
             current_delta = merged_positions.delta.sum()
 
