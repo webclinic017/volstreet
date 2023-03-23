@@ -1,4 +1,4 @@
-import autotradingfunctions as atf
+from autotrader import autotradingfunctions as atf
 from time import sleep
 import json
 

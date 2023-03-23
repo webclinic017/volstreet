@@ -1,4 +1,4 @@
-import autotradingfunctions as atf
+from autotrader import autotradingfunctions as atf
 import threading
 import json
 from datetime import time
