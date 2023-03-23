@@ -26,7 +26,5 @@ def fetch_holidays():
     return holidays
 
 
-
 scrips = get_ticker_file()
 holidays = fetch_holidays()
-abc = ['okay']

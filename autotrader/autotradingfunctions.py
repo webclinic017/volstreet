@@ -34,7 +34,6 @@ def login(user, pin, apikey, authkey, webhook_url=None):
 
 
 def start_websocket(exchangetype=1, tokens=None):
-
     websocket_started = False
 
     if tokens is None:
@@ -51,9 +50,9 @@ def start_websocket(exchangetype=1, tokens=None):
     token_list = [{'exchangeType': exchangetype, 'tokens': tokens}]
 
     def on_data(wsapp, message):
-        price_dict[message['token']] = {'ltp': message['last_traded_price']/100,
+        price_dict[message['token']] = {'ltp': message['last_traded_price'] / 100,
                                         'timestamp': datetime.fromtimestamp(
-                                            message['exchange_timestamp']/1000).strftime('%H:%M:%S')}
+                                            message['exchange_timestamp'] / 1000).strftime('%H:%M:%S')}
 
     def on_open(wsapp):
         nonlocal websocket_started
@@ -82,12 +81,12 @@ def start_websocket(exchangetype=1, tokens=None):
 
 def fetch_price_dict():
     global price_dict
-    new_price_dict = {scrips.loc[scrips.token == token]['symbol'].values[0]: value for token, value in price_dict.items()}
+    new_price_dict = {scrips.loc[scrips.token == token]['symbol'].values[0]: value for token, value in
+                      price_dict.items()}
     return new_price_dict
 
 
 def fetch_book(book):
-
     if book == 'orderbook':
         for attempt in range(1, 7):
             try:
@@ -129,7 +128,6 @@ def fetch_book(book):
 
 # Look up and return function for position and orderbook
 def lookup_and_return(book, fieldtolookup, valuetolookup, fieldtoreturn):
-
     """Specify the dictionary as 'positions' or 'orderbook' or pass a dictionary. The valuetolookup can be
     a list or a single value. If provided a list, the function will return a numpy array of values. If provided a
     single value, the function will return a single value. Will return an empty array or 0 if the value is
@@ -238,7 +236,6 @@ def fetch_lot_size(name):
 
 
 def fetch_symbol_token(name):
-
     """Fetches symbol & token for a given scrip name. Provide just a single world if
     you want to fetch the symbol & token for the cash segment. If you want to fetch the
     symbol & token for the options segment, provide name in the format '{name} {strike} {expiry} {optiontype}'.
@@ -273,8 +270,7 @@ def fetch_symbol_token(name):
 
 # LTP function
 def fetchltp(exchange_seg, symbol, token):
-
-    for attempt in range(1,6):
+    for attempt in range(1, 6):
         try:
             price = obj.ltpData(exchange_seg, symbol, token)['data']['ltp']
             return price
@@ -307,7 +303,6 @@ def fetchpreviousclose(exchange_seg, symbol, token):
 
 
 def fetch_straddle_price(name, expiry, strike, return_total_price=False):
-
     """Fetches the price of the straddle for a given name, expiry and strike. Expiry should be in the DDMMMYY format.
     If return_total_price is True, then the total price of the straddle is returned. If return_total_price is False,
     then the price of the call and put is returned as a tuple."""
@@ -323,7 +318,6 @@ def fetch_straddle_price(name, expiry, strike, return_total_price=False):
 
 
 def fetch_strangle_price(name, expiry, call_strike, put_strike, return_total_price=False):
-
     """Fetches the price of the strangle for a given name, expiry and strike. Expiry should be in the DDMMMYY format.
     If return_total_price is True, then the total price of the strangle is returned. If return_total_price is False,
     then the price of the call and put is returned as a tuple."""
@@ -343,15 +337,27 @@ def findstrike(x, base):
     return base * round(x / base)
 
 
-def timetoexpiry(expiry):
+def timetoexpiry(expiry, effective_time=False, in_days=False):
     """Return time left to expiry"""
-    time_to_expiry = ((datetime.strptime(expiry, '%d%b%y') + pd.DateOffset(minutes=930)) - currenttime()) / timedelta(
-        days=365)
-    return time_to_expiry
+    if in_days:
+        multiplier = 365
+    else:
+        multiplier = 1
+
+    expiry = datetime.strptime(expiry, '%d%b%y')
+    time_to_expiry = ((expiry + pd.DateOffset(minutes=930)) - currenttime()) / timedelta(days=365)
+
+    # Subtracting holidays and weekends
+    if effective_time:
+        date_range = pd.date_range(currenttime().date(), expiry - timedelta(days=1))
+        numer_of_weekdays = sum(date_range.dayofweek > 4)
+        number_of_holidays = sum(date_range.isin(holidays))
+        time_to_expiry -= (numer_of_weekdays + number_of_holidays) / 365
+        # print(f'Number of weekdays: {numer_of_weekdays} and number of holidays: {number_of_holidays}')
+    return time_to_expiry * multiplier
 
 
 def straddleiv(callprice, putprice, spot, strike, timeleft):
-
     call_iv = bs.implied_volatility(callprice, spot, strike, timeleft, 0.05, 'c')
     put_iv = bs.implied_volatility(putprice, spot, strike, timeleft, 0.05, 'p')
     avg_iv = (call_iv + put_iv) / 2 * 100
@@ -360,14 +366,13 @@ def straddleiv(callprice, putprice, spot, strike, timeleft):
 
 
 def calc_greeks(position_string, position_price, underlying_price):
-
     """Fetches the price, iv and delta of a stock"""
 
     name, strike, expiry, option_type = position_string.split()
     strike = int(strike)
     time_left = timetoexpiry(expiry)
 
-    iv = bs.implied_volatility(position_price, underlying_price, strike, time_left, 0.05, option_type)*100
+    iv = bs.implied_volatility(position_price, underlying_price, strike, time_left, 0.05, option_type) * 100
     delta = bs.delta(underlying_price, strike, time_left, 0.05, iv, option_type)
     gamma = bs.gamma(underlying_price, strike, time_left, 0.05, iv)
 
@@ -377,7 +382,6 @@ def calc_greeks(position_string, position_price, underlying_price):
 # ORDER FUNCTIONS BELOW #
 
 def placeorder(symbol, token, qty, buyorsell, orderprice, ordertag=""):
-
     """Provide symbol, token, qty (shares), buyorsell, orderprice, ordertag (optional)"""
 
     if orderprice == 'MARKET':
@@ -433,7 +437,6 @@ def placeorder(symbol, token, qty, buyorsell, orderprice, ordertag=""):
 
 
 def placeSLorder(symbol, token, qty, buyorsell, triggerprice, ordertag=""):
-
     executionprice = triggerprice * 1.1
 
     params = {"variety": "STOPLOSS",
@@ -467,7 +470,6 @@ def placeSLorder(symbol, token, qty, buyorsell, triggerprice, ordertag=""):
 
 
 def place_synthetic_fut_order(name, strike, expiry, buy_or_sell, quantity, price='MARKET'):
-
     """Places a synthetic future order. Quantity is in number of shares."""
 
     call_symbol, call_token = fetch_symbol_token(f'{name} {strike} {expiry} CE')
@@ -491,7 +493,6 @@ def place_synthetic_fut_order(name, strike, expiry, buy_or_sell, quantity, price
 
 
 class Index:
-
     """Initialize an index with the name of the index in uppercase"""
 
     def __init__(self, name, webhook_url=None, subscribe_to_ws=False):
@@ -506,8 +507,6 @@ class Index:
         self.next_expiry = None
         self.month_expiry = None
         self.fut_expiry = None
-        self.points_captured = None
-        self.stoploss = None
         self.webhook_url = webhook_url
 
         self.symbol, self.token = fetch_symbol_token(name)
@@ -603,8 +602,8 @@ class Index:
             spliced_orders = [quantity_in_lots]
         return spliced_orders
 
-    def place_batch_order(self, expiry, buy_or_sell, quantity_in_lots, strike=None, call_strike=None,
-                          put_strike=None, return_avg_price=False, order_tag=""):
+    def place_combined_order(self, expiry, buy_or_sell, quantity_in_lots, strike=None, call_strike=None,
+                             put_strike=None, return_avg_price=False, order_tag=""):
 
         """
         Places a straddle or strangle order on the index.
@@ -620,14 +619,15 @@ class Index:
         """
 
         if strike is None:
-            if call_strike is None or put_strike is None:
+            if call_strike is None and put_strike is None:
                 raise ValueError('Strike price not specified')
+            strike_info = f'{call_strike}CE {put_strike}PE'
         elif call_strike is None and put_strike is None:
             call_strike = strike
             put_strike = strike
+            strike_info = f'{strike}'
         else:
             raise ValueError('Strike price specified twice')
-
 
         call_symbol, call_token = fetch_symbol_token(f'{self.name} {call_strike} {expiry} CE')
         put_symbol, put_token = fetch_symbol_token(f'{self.name} {put_strike} {expiry} PE')
@@ -641,7 +641,6 @@ class Index:
         call_order_id_list = []
         put_order_id_list = []
         for quantity in spliced_orders:
-
             call_order_id = placeorder(call_symbol, call_token,
                                        quantity * self.lot_size,
                                        buy_or_sell, call_price * limit_price_extender,
@@ -661,7 +660,7 @@ class Index:
 
         if all(call_order_statuses == 'complete') and all(put_order_statuses == 'complete'):
             notifier(f'{order_tag}: Order(s) placed successfully for {buy_or_sell} {self.name} ' +
-                     f'{strike} {expiry} {quantity_in_lots} lot(s).', self.webhook_url)
+                     f'{strike_info} {expiry} {quantity_in_lots} lot(s).', self.webhook_url)
             call_order_avg_price = lookup_and_return(orderbook, 'orderid',
                                                      call_order_id_list, 'averageprice').astype(float).mean()
             put_order_avg_price = lookup_and_return(orderbook, 'orderid',
@@ -679,12 +678,12 @@ class Index:
 
         elif all(call_order_statuses == 'rejected') and all(put_order_statuses == 'rejected'):
             notifier(f'{order_tag}: All orders rejected for {buy_or_sell} {self.name} ' +
-                     f'{strike} {expiry} {quantity_in_lots} lot(s).', self.webhook_url)
+                     f'{strike_info} {expiry} {quantity_in_lots} lot(s).', self.webhook_url)
             raise Exception('Orders rejected')
 
         else:
             notifier(f'{order_tag}: ERROR. Order statuses uncertain for {buy_or_sell} {self.name} ' +
-                     f'{strike} {expiry} {quantity_in_lots} lot(s).', self.webhook_url)
+                     f'{strike_info} {expiry} {quantity_in_lots} lot(s).', self.webhook_url)
             raise Exception('Order statuses uncertain')
 
     def place_synthetic_fut_order(self, strike, expiry, buy_or_sell, quantity, price='MARKET'):
@@ -821,11 +820,11 @@ class Index:
             def update_disparity_dict(stk, mydict):
                 c_symbol, c_token = fetch_symbol_token(f'{self.name} {stk} {self.current_expiry} CE')
                 p_symbol, p_token = fetch_symbol_token(f'{self.name} {stk} {self.current_expiry} PE')
-                call_price = fetchltp('NFO', call_symbol, call_token)
-                put_price = fetchltp('NFO', put_symbol, put_token)
-                disparity = abs(call_price - put_price) / min(call_price, put_price) * 100
+                c_price = fetchltp('NFO', c_symbol, c_token)
+                p_price = fetchltp('NFO', p_symbol, p_token)
+                disparity = abs(c_price - p_price) / min(c_price, p_price) * 100
                 mydict[stk] = disparity, c_symbol, c_token, \
-                    p_symbol, p_token, call_price, put_price
+                    p_symbol, p_token, c_price, p_price
 
             for strike in strike_range:
                 update_disparity_dict(strike, disparity_dict)
@@ -886,10 +885,10 @@ class Index:
             self.order_list.append(order_log)
         else:
             notifier(f'Buying {buy_strike} and selling {sell_strike}.', self.webhook_url)
-            self.place_batch_order(expirytobuy, 'BUY', quantity_in_lots,
-                                   strike=buy_strike, order_tag='Daily overnight short straddle')
-            self.place_batch_order(expirytosell, 'SELL', quantity_in_lots,
-                                   strike=sell_strike, order_tag='Daily overnight short straddle')
+            self.place_combined_order(expirytobuy, 'BUY', quantity_in_lots, strike=buy_strike,
+                                      order_tag='Daily overnight short straddle')
+            self.place_combined_order(expirytosell, 'SELL', quantity_in_lots, strike=sell_strike,
+                                      order_tag='Daily overnight short straddle')
 
         # Updating daily_sold_strike.txt
         with open(f"{self.name}_daily_sold_strike.txt", "w") as file:
@@ -902,15 +901,15 @@ class Index:
         if type_of_hedge == 'strangle':
             call_strike = findstrike(ltp * kwargs['call_offset'], self.base)
             put_strike = findstrike(ltp * kwargs['put_offset'], self.base)
-            self.place_batch_order(self.next_expiry, 'BUY', quantity_in_lots, call_strike=call_strike,
-                                   put_strike=put_strike, order_tag='Weekly hedge')
+            self.place_combined_order(self.next_expiry, 'BUY', quantity_in_lots, call_strike=call_strike,
+                                      put_strike=put_strike, order_tag='Weekly hedge')
         elif type_of_hedge == 'straddle':
             strike = findstrike(ltp * kwargs['strike_offset'], self.base)
-            self.place_batch_order(self.next_expiry, 'BUY', quantity_in_lots, strike=strike,
-                                   order_tag='Weekly hedge')
+            self.place_combined_order(self.next_expiry, 'BUY', quantity_in_lots, strike=strike,
+                                      order_tag='Weekly hedge')
 
     def intraday_straddle(self, quantity_in_lots, exit_time=(15, 28), websocket=False, wait_for_equality=False,
-                          monitor_sl=False, move_sl=False, **kwargs):
+                          monitor_sl=False, move_sl=False, record_trades=False, **kwargs):
 
         """Params:
         quantity_in_lots: Quantity in lots
@@ -928,16 +927,15 @@ class Index:
         # Finding equal strike, setting expiry
         equal_strike, call_symbol, \
             call_token, put_symbol, \
-            put_token, call_ltp, put_ltp = self.find_equal_strike(exit_time=exit_time, websocket=websocket,
-                                                                  wait_for_equality=wait_for_equality, **kwargs)
+            put_token, call_price, put_price = self.find_equal_strike(exit_time=exit_time, websocket=websocket,
+                                                                      wait_for_equality=wait_for_equality, **kwargs)
         expiry = self.current_expiry
 
         notifier(f'{self.name}: Initiating intraday trade on {equal_strike} strike.', self.webhook_url)
 
         # Placing orders
-        call_avg_price, put_avg_price = self.place_batch_order(expiry, 'SELL', quantity_in_lots,
-                                                               strike=equal_strike, return_avg_price=True,
-                                                               order_tag='Intraday straddle')
+        call_avg_price, put_avg_price = self.place_combined_order(expiry, 'SELL', quantity_in_lots, strike=equal_strike,
+                                                                  return_avg_price=True, order_tag='Intraday straddle')
 
         if 'stoploss' in kwargs:
             sl = kwargs['stoploss']
@@ -1180,8 +1178,8 @@ class Index:
                                                put_stoploss_order_ids, 'averageprice').astype(float).mean()
             call_exit_price = lookup_and_return(orderbook, 'orderid',
                                                 call_stoploss_order_ids, 'averageprice').astype(float).mean()
-            self.points_captured = (put_avg_price - put_exit_price) + (call_avg_price - call_exit_price)
-            self.stoploss = 'Both'
+            points_captured = (put_avg_price - put_exit_price) + (call_avg_price - call_exit_price)
+            stoploss_type = 'Both'
 
         elif call_sl_hit:
             for quantity in spliced_orders:
@@ -1191,8 +1189,9 @@ class Index:
             notifier(f'{self.name}: Exited put. Call stoploss was triggered.', self.webhook_url)
             call_exit_price = lookup_and_return(orderbook, 'orderid',
                                                 call_stoploss_order_ids, 'averageprice').astype(float).mean()
-            self.points_captured = (call_avg_price - call_exit_price) + (put_avg_price - put_price)
-            self.stoploss = 'Call'
+            put_exit_price = put_price
+            points_captured = (call_avg_price - call_exit_price) + (put_avg_price - put_exit_price)
+            stoploss_type = 'Call'
 
         elif put_sl_hit:
             for quantity in spliced_orders:
@@ -1202,17 +1201,26 @@ class Index:
             notifier(f'{self.name}: Exited call. Put stoploss was triggered.', self.webhook_url)
             put_exit_price = lookup_and_return(orderbook, 'orderid',
                                                put_stoploss_order_ids, 'averageprice').astype(float).mean()
-            self.points_captured = (put_avg_price - put_exit_price) + (call_avg_price - call_price)
-            self.stoploss = 'Put'
+            call_exit_price = call_price
+            points_captured = (put_avg_price - put_exit_price) + (call_avg_price - call_exit_price)
+            stoploss_type = 'Put'
 
         else:
-            self.place_batch_order(expiry, 'BUY', quantity_in_lots, strike=equal_strike)
+            self.place_combined_order(expiry, 'BUY', quantity_in_lots, strike=equal_strike)
             notifier(f'{self.name}: Exited positions. No stoploss was triggered.', self.webhook_url)
-            self.points_captured = (call_avg_price + put_avg_price) - (call_price + put_price)
-            self.stoploss = 'None'
+            call_exit_price = call_price
+            put_exit_price = put_price
+            points_captured = (call_avg_price + put_avg_price) - (call_exit_price + put_exit_price)
+            stoploss_type = 'None'
 
-        self.order_list[0]['Points Captured'] = self.points_captured
-        self.order_list[0]['Stoploss'] = self.stoploss
+        exit_dict = {'Call exit price': call_exit_price, 'Put exit price': put_exit_price,
+                     'Total exit price': call_exit_price + put_exit_price, 'Points captured': points_captured,
+                     'Stoploss': stoploss_type}
+
+        try:
+            self.order_list[0].update(exit_dict)
+        except Exception as e:
+            notifier(f'{self.name}: Error updating order list with exit details. {e}', self.webhook_url)
 
         in_trade = False
         if websocket:
@@ -1229,8 +1237,8 @@ class Index:
         notifier(f'{self.name}: Initiating intraday trade on {equal_strike} strike.', self.webhook_url)
 
         # Placing orders
-        self.place_batch_order(expiry, 'SELL', quantity_in_lots, strike=equal_strike, return_avg_price=True,
-                               order_tag='Intraday straddle with delta')
+        self.place_combined_order(expiry, 'SELL', quantity_in_lots, strike=equal_strike, return_avg_price=True,
+                                  order_tag='Intraday straddle with delta')
 
         positions = {
 
@@ -1293,15 +1301,15 @@ class Index:
 
         # Closing the main positions along with the delta positions if any are open
         notifier(f'Intraday straddle with delta: Closing positions.', self.webhook_url)
-        self.place_batch_order(expiry, 'BUY', quantity_in_lots, strike=equal_strike,
-                               order_tag='Intraday straddle with delta')
+        self.place_combined_order(expiry, 'BUY', quantity_in_lots, strike=equal_strike,
+                                  order_tag='Intraday straddle with delta')
 
         # Squaring off the delta positions
         call_delta_quantity = positions[synthetic_fut_call]['delta_quantity']
         put_delta_quantity = positions[synthetic_fut_put]['delta_quantity']
 
         if call_delta_quantity != 0 and put_delta_quantity != 0:
-            assert call_delta_quantity == -1*put_delta_quantity
+            assert call_delta_quantity == -1 * put_delta_quantity
             quantity_to_square_up = abs(call_delta_quantity)
 
             if call_delta_quantity > 0:
