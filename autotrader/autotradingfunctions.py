@@ -8,9 +8,8 @@ from smartapi import SmartConnect
 from smartapi.smartExceptions import DataException
 import pyotp
 from threading import Thread
-from SmartWebSocketV2 import SmartWebSocketV2
-import blackscholes as bs
-from autotrader import scrips, holidays
+from autotrader.SmartWebSocketV2 import SmartWebSocketV2
+from autotrader import scrips, holidays, blackscholes as bs, nsefunctions as nse
 
 global login_data, obj, sws, price_dict
 
@@ -492,6 +491,29 @@ def place_synthetic_fut_order(name, strike, expiry, buy_or_sell, quantity, price
         print(f'Synthetic Futs: {buy_or_sell} Order for {quantity} quantity completed.')
 
 
+class SharedData:
+    def __init__(self):
+        self.position_data = None
+        self.orderbook_data = None
+        self.updated_time = None
+        self.error_info = None
+
+    def fetch_data(self):
+        try:
+            self.position_data = fetch_book('position')
+            self.orderbook_data = fetch_book('orderbook')
+            self.updated_time = currenttime()
+        except Exception as e:
+            self.position_data = None
+            self.orderbook_data = None
+            self.error_info = e
+
+    def update_data(self, sleep_time=5, exit_time=(15, 30)):
+        while currenttime().time() < time(*exit_time):
+            self.fetch_data()
+            sleep(sleep_time)
+
+
 class Index:
     """Initialize an index with the name of the index in uppercase"""
 
@@ -805,7 +827,7 @@ class Index:
             for token in tokens_to_unsubscribe:
                 del price_dict[token]
             print(f'{self.name}: Unsubscribed from tokens')
-            return strike_to_trade, call_symbol, put_symbol, call_token, put_token, call_ltp, put_ltp
+            return strike_to_trade, call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp
 
         else:
 
@@ -840,7 +862,7 @@ class Index:
 
             strike_to_trade = min(disparity_dict, key=disparity_dict.get)
             call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp = disparity_dict[strike_to_trade][1:]
-            return strike_to_trade, call_symbol, put_symbol, call_token, put_token, call_ltp, put_ltp
+            return strike_to_trade, call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp
 
     def rollover_overnight_short_straddle(self, quantity_in_lots, strike_offset=1):
 
@@ -909,7 +931,7 @@ class Index:
                                       order_tag='Weekly hedge')
 
     def intraday_straddle(self, quantity_in_lots, exit_time=(15, 28), websocket=False, wait_for_equality=False,
-                          monitor_sl=False, move_sl=False, record_trades=False, **kwargs):
+                          monitor_sl=False, move_sl=False, shared_data=None, **kwargs):
 
         """Params:
         quantity_in_lots: Quantity in lots
@@ -975,12 +997,13 @@ class Index:
         in_trade = True
         call_sl_hit = False
         put_sl_hit = False
+        error_faced = False
 
         def price_tracker():
 
             nonlocal call_price, put_price
             loop_number = 0
-            while in_trade:
+            while in_trade and not error_faced:
                 if websocket:
                     underlying_price = price_dict.get(self.token, 0)['ltp']
                     call_price = price_dict.get(call_token, 0)['ltp']
@@ -1003,10 +1026,20 @@ class Index:
 
             price_updater.start()
 
-            def check_sl_orders(order_ids, side):
+            def check_sl_orders(order_ids, side, data=shared_data):
 
                 nonlocal orderbook
-                orderbook = fetch_book('orderbook')
+                # If first time checking, fetch orderbook and do not use shared data
+                if data is None:
+                    orderbook = fetch_book('orderbook')
+                # If not first time checking, use shared data if it is not too old
+                else:
+                    if currenttime() - data.updated_time < timedelta(seconds=15) and data.orderbook_data is not None:
+                        # print(f'{self.name} {side} Using shared data. Updated at {data.updated_time:%H:%M:%S}')
+                        orderbook = data.orderbook_data
+                    else:
+                        orderbook = fetch_book('orderbook')
+
                 statuses = lookup_and_return(orderbook, 'orderid', order_ids, 'status')
                 sleep(1)
 
@@ -1059,11 +1092,17 @@ class Index:
                     notifier(f'{self.name} {side} stoploss orders in unknown state.', self.webhook_url)
                     raise Exception(f'{side} stoploss orders in unknown state.')
 
+            sleep(10)
             # Monitoring begins here
             while currenttime().time() < time(*exit_time) and not call_sl_hit and not put_sl_hit:
-
-                call_sl_hit, call_sl_orders_complete = check_sl_orders(call_stoploss_order_ids, 'call')
-                put_sl_hit, put_sl_orders_complete = check_sl_orders(put_stoploss_order_ids, 'put')
+                try:
+                    call_sl_hit, call_sl_orders_complete = check_sl_orders(call_stoploss_order_ids, 'call')
+                    put_sl_hit, put_sl_orders_complete = check_sl_orders(put_stoploss_order_ids, 'put')
+                except Exception as e:
+                    notifier(f'{self.name} Error: {e}', self.webhook_url)
+                    error_faced = True
+                    price_updater.join()
+                    raise Exception(f'Error: {e}')
 
                 if call_sl_hit:
 
