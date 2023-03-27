@@ -230,7 +230,7 @@ def markethours():
 def currenttime():
     # Adjusting for timezones
     ist = timezone(timedelta(hours=5, minutes=30))
-    return datetime.now(ist)
+    return datetime.now(ist).replace(tzinfo=None)
 
 
 def fetch_lot_size(name):
