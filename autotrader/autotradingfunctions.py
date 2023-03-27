@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from time import sleep
 import requests
 import json
@@ -10,6 +10,7 @@ import pyotp
 from threading import Thread
 from autotrader.SmartWebSocketV2 import SmartWebSocketV2
 from autotrader import scrips, holidays, blackscholes as bs, nsefunctions as nse
+from collections import defaultdict
 
 global login_data, obj, sws, price_dict
 
@@ -227,7 +228,9 @@ def markethours():
 
 # Defining current time
 def currenttime():
-    return datetime.now()
+    # Adjusting for timezones
+    ist = timezone(timedelta(hours=5, minutes=30))
+    return datetime.now(ist)
 
 
 def fetch_lot_size(name):
@@ -522,13 +525,11 @@ class Index:
         self.name = name
         self.ltp = None
         self.previous_close = None
-        self.current_strike = None
-        self.previous_strike = None
-        self.order_list = []
         self.current_expiry = None
         self.next_expiry = None
         self.month_expiry = None
         self.fut_expiry = None
+        self.order_log = defaultdict(list)
         self.webhook_url = webhook_url
 
         self.symbol, self.token = fetch_symbol_token(name)
@@ -557,13 +558,21 @@ class Index:
                 print('Websocket not initialized. Please initialize the websocket before subscribing to it.')
 
     def fetch_freeze_limit(self):
-        freeze_qty_url = 'https://www1.nseindia.com/content/fo/qtyfreeze.xls'
-        df = pd.read_excel(freeze_qty_url)
-        df.columns = df.columns.str.strip()
-        df['SYMBOL'] = df['SYMBOL'].str.strip()
-        freeze_qty = df[df['SYMBOL'] == self.name]['VOL_FRZ_QTY'].values[0]
-        freeze_qty_in_lots = freeze_qty / self.lot_size
-        return freeze_qty_in_lots
+        try:
+            freeze_qty = nse.nse_fno(self.name)['vfq']
+            freeze_qty_in_lots = int(freeze_qty / self.lot_size)
+            assert freeze_qty_in_lots > 0
+            print('Freeze qty in lots: ', freeze_qty_in_lots, ' for ', self.name, ' fetched from nse api')
+            return freeze_qty_in_lots
+        except Exception as e:
+            print(e)
+            freeze_qty_url = 'https://www1.nseindia.com/content/fo/qtyfreeze.xls'
+            df = pd.read_excel(freeze_qty_url)
+            df.columns = df.columns.str.strip()
+            df['SYMBOL'] = df['SYMBOL'].str.strip()
+            freeze_qty = df[df['SYMBOL'] == self.name]['VOL_FRZ_QTY'].values[0]
+            freeze_qty_in_lots = freeze_qty / self.lot_size
+            return freeze_qty_in_lots
 
     def fetch_expirys(self):
 
@@ -607,6 +616,14 @@ class Index:
     def fetch_previous_close(self):
         self.previous_close = fetchpreviousclose('NSE', self.symbol, self.token)
         return self.previous_close
+
+    def log_order(self, strike, expiry, buy_or_sell, call_price, put_price, order_tag):
+        dict_format = {'Date': currenttime().strftime('%d-%m-%Y %H:%M:%S'), 'Index': self.name,
+                       'Put Strike': strike, 'Call Strike': strike, 'Expiry': expiry,
+                       'Action Type': buy_or_sell, 'Call Price': call_price,
+                       'Put Price': put_price, 'Total Price': call_price + put_price,
+                       'Tag': order_tag}
+        self.order_log[order_tag].append(dict_format)
 
     def splice_orders(self, quantity_in_lots):
 
@@ -687,22 +704,14 @@ class Index:
                                                      call_order_id_list, 'averageprice').astype(float).mean()
             put_order_avg_price = lookup_and_return(orderbook, 'orderid',
                                                     put_order_id_list, 'averageprice').astype(float).mean()
-            order_log = {'Date': currenttime().strftime('%d-%m-%Y %H:%M:%S'), 'Index': self.name,
-                         'Put Strike': strike, 'Call Strike': strike, 'Expiry': expiry,
-                         'Action Type': buy_or_sell, 'Call Price': call_order_avg_price,
-                         'Put Price': put_order_avg_price, 'Total Price': call_order_avg_price + put_order_avg_price,
-                         'Tag': order_tag}
-            self.order_list.append(order_log)
             if return_avg_price:
                 return call_order_avg_price, put_order_avg_price
             else:
                 return
-
         elif all(call_order_statuses == 'rejected') and all(put_order_statuses == 'rejected'):
             notifier(f'{order_tag}: All orders rejected for {buy_or_sell} {self.name} ' +
                      f'{strike_info} {expiry} {quantity_in_lots} lot(s).', self.webhook_url)
             raise Exception('Orders rejected')
-
         else:
             notifier(f'{order_tag}: ERROR. Order statuses uncertain for {buy_or_sell} {self.name} ' +
                      f'{strike_info} {expiry} {quantity_in_lots} lot(s).', self.webhook_url)
@@ -864,58 +873,95 @@ class Index:
             call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp = disparity_dict[strike_to_trade][1:]
             return strike_to_trade, call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp
 
-    def rollover_overnight_short_straddle(self, quantity_in_lots, strike_offset=1):
+    def rollover_overnight_short_straddle(self, quantity_in_lots, strike_offset=1, iv_threshold=0.8):
 
-        """Buys the previous day's strike and sells the current strike"""
+        """ Rollover overnight short straddle to the next expiry.
+        Args:
+            quantity_in_lots (int): Quantity of the straddle in lots.
+            strike_offset (float): Strike offset from the current strike.
+            iv_threshold (float): IV threshold compared to vix.
+        """
 
-        # Deciding which expirys to trade
-        daystocurrentexpiry = timetoexpiry(self.current_expiry) * 365
-        if 2 > daystocurrentexpiry > 1:
-            expirytobuy = self.current_expiry
-            expirytosell = self.next_expiry
-        elif daystocurrentexpiry < 1:
-            expirytobuy = self.next_expiry
-            expirytosell = self.next_expiry
+        def load_data():
+            try:
+                with open('positions.json', 'r') as f:
+                    data = json.load(f)
+                    return data
+            except FileNotFoundError:
+                data = {'NIFTY': None, 'BANKNIFTY': None}
+                notifier('No positions found for OSS. Creating new file.', self.webhook_url)
+                with open('positions.json', 'w') as f:
+                    json.dump(data, f)
+                return data
+            except Exception as e:
+                notifier(f'Error while reading positions.json: {e}', self.webhook_url)
+                raise Exception('Error while reading positions.json')
+
+        def save_data(data):
+            with open('positions.json', 'w') as f:
+                json.dump(data, f)
+
+        order_tag = 'Overnight Short Straddle'
+
+        if timetoexpiry(self.current_expiry, effective_time=True, in_days=True) > 4:  # far from expiry
+            ltp = self.fetch_ltp()
+            sell_strike = findstrike(ltp * strike_offset, self.base)
+            call_ltp, put_ltp = fetch_straddle_price(self.name, self.current_expiry, sell_strike)
+            iv = straddleiv(call_ltp, put_ltp, ltp, sell_strike, timetoexpiry(self.current_expiry))
+            vix = nse.indiavix()
+            if iv < vix * iv_threshold:
+                notifier(f'IV is too low compared to VIX: IV {iv}, Vix {vix}.', self.webhook_url)
+                return
+            else:
+                notifier(f'IV is fine compared to VIX: IV {iv}, Vix {vix}.', self.webhook_url)
+        elif timetoexpiry(self.current_expiry, effective_time=True, in_days=True) < 2:  # only exit
+            sell_strike = None
         else:
-            expirytobuy = self.current_expiry
-            expirytosell = self.current_expiry
+            ltp = self.fetch_ltp()
+            sell_strike = findstrike(ltp * strike_offset, self.base)
 
-        # Setting Strikes
-        sell_strike = findstrike(self.fetch_ltp() * strike_offset, self.base)
-        buy_strike = findstrike(self.fetch_previous_close() * strike_offset, self.base)
+        trade_data = load_data()
+        buy_strike = trade_data[self.name]
 
-        # Matching estimated previous strike with actual sold strike
-        with open(f"{self.name}_daily_sold_strike.txt", "r") as file:
-            sold_strike = int(file.read())
-        if sold_strike != buy_strike:
-            notifier(f'Estimated sold strike {buy_strike} does not match ' +
-                     f'actual sold strike {sold_strike}. Changing strike to buy to {sold_strike}. ', self.webhook_url)
-            buy_strike = sold_strike
+        if not isinstance(buy_strike, int) and not isinstance(buy_strike, float) and buy_strike is not None:
+            notifier(f'Invalid strike found for {self.name}.', self.webhook_url)
+            raise Exception(f'Invalid strike found for {self.name}.')
 
         # Placing orders
-        if buy_strike == sell_strike and expirytobuy == expirytosell:
-            notifier('No trade today.', self.webhook_url)
-            call_symbol, call_token = fetch_symbol_token(f'{self.name} {sell_strike} {expirytosell} CE')
-            put_symbol, put_token = fetch_symbol_token(f'{self.name} {sell_strike} {expirytosell} PE')
-            call_ltp = fetchltp('NFO', call_symbol, call_token)
-            put_ltp = fetchltp('NFO', put_symbol, put_token)
-            order_log = {'Date': currenttime().strftime('%d-%m-%Y %H:%M:%S'), 'Index': self.name,
-                         'Put Strike': buy_strike, 'Call Strike': buy_strike, 'Expiry': expirytobuy,
-                         'Action Type': 'No trade required', 'Call Price': call_ltp,
-                         'Put Price': put_ltp, 'Total Price': call_ltp + put_ltp,
-                         'Tag': 'Daily overnight short straddle'}
-            self.order_list.append(order_log)
-        else:
-            notifier(f'Buying {buy_strike} and selling {sell_strike}.', self.webhook_url)
-            self.place_combined_order(expirytobuy, 'BUY', quantity_in_lots, strike=buy_strike,
-                                      order_tag='Daily overnight short straddle')
-            self.place_combined_order(expirytosell, 'SELL', quantity_in_lots, strike=sell_strike,
-                                      order_tag='Daily overnight short straddle')
+        if buy_strike is None and sell_strike is None:
+            notifier('No trade required.', self.webhook_url)
+            return
+        elif sell_strike is None:  # only exiting current position
+            notifier(f'Exiting current position on strike {buy_strike}.', self.webhook_url)
+            call_buy_avg, put_buy_avg = self.place_combined_order(self.current_expiry, 'BUY', quantity_in_lots,
+                                                                  strike=buy_strike, return_avg_price=True,
+                                                                  order_tag=order_tag)
+            self.log_order(buy_strike, self.current_expiry, 'BUY', call_buy_avg, put_buy_avg, order_tag)
+        elif buy_strike is None:  # only entering new position
+            notifier(f'Entering new position on strike {sell_strike}.', self.webhook_url)
+            call_sell_avg, put_sell_avg = self.place_combined_order(self.current_expiry, 'SELL', quantity_in_lots,
+                                                                    strike=sell_strike, return_avg_price=True,
+                                                                    order_tag=order_tag)
+            self.log_order(sell_strike, self.current_expiry, 'SELL', call_sell_avg, put_sell_avg, order_tag)
+        else:  # both entering and exiting positions
+            if buy_strike == sell_strike:
+                notifier('No trade required as strike is same.', self.webhook_url)
+                call_ltp, put_ltp = fetch_straddle_price(self.name, self.current_expiry, sell_strike)
+                self.log_order(buy_strike, self.current_expiry, 'BUY', call_ltp, put_ltp, order_tag)
+                self.log_order(sell_strike, self.current_expiry, 'SELL', call_ltp, put_ltp, order_tag)
+            else:
+                notifier(f'Buying {buy_strike} and selling {sell_strike}.', self.webhook_url)
+                call_buy_avg, put_buy_avg = self.place_combined_order(self.current_expiry, 'BUY', quantity_in_lots,
+                                                                      strike=buy_strike, return_avg_price=True,
+                                                                      order_tag=order_tag)
+                call_sell_avg, put_sell_avg = self.place_combined_order(self.current_expiry, 'SELL', quantity_in_lots,
+                                                                        strike=sell_strike, return_avg_price=True,
+                                                                        order_tag=order_tag)
+                self.log_order(buy_strike, self.current_expiry, 'BUY', call_buy_avg, put_buy_avg, order_tag)
+                self.log_order(sell_strike, self.current_expiry, 'SELL', call_sell_avg, put_sell_avg, order_tag)
 
-        # Updating daily_sold_strike.txt
-        with open(f"{self.name}_daily_sold_strike.txt", "w") as file:
-            file.write(str(sell_strike))
-        return
+        trade_data[self.name] = sell_strike
+        save_data(trade_data)
 
     def buy_weekly_hedge(self, quantity_in_lots, type_of_hedge='strangle', **kwargs):
 
@@ -943,6 +989,8 @@ class Index:
         kwargs: 'stoploss': Stop loss  | Default: 1.5 and 1.7 on expiries, 'target_disparity':
         Target disparity"""
 
+        order_tag = 'Intraday straddle'
+
         # Splicing orders
         spliced_orders = self.splice_orders(quantity_in_lots)
 
@@ -957,7 +1005,7 @@ class Index:
 
         # Placing orders
         call_avg_price, put_avg_price = self.place_combined_order(expiry, 'SELL', quantity_in_lots, strike=equal_strike,
-                                                                  return_avg_price=True, order_tag='Intraday straddle')
+                                                                  return_avg_price=True, order_tag=order_tag)
 
         if 'stoploss' in kwargs:
             sl = kwargs['stoploss']
@@ -989,7 +1037,8 @@ class Index:
             notifier(f'{self.name} stoploss orders not placed successfully', self.webhook_url)
             raise Exception('Stoploss orders not placed successfully')
 
-        summary_message = '\n'.join(f'{k}: {v}' for k, v in self.order_list[0].items())
+        self.log_order(equal_strike, expiry, 'SELL', call_avg_price, put_avg_price, order_tag)
+        summary_message = '\n'.join(f'{k}: {v}' for k, v in self.order_log[order_tag][0].items())
         notifier(summary_message, self.webhook_url)
         sleep(1)
 
@@ -1257,7 +1306,7 @@ class Index:
                      'Stoploss': stoploss_type}
 
         try:
-            self.order_list[0].update(exit_dict)
+            self.order_log[order_tag][0].update(exit_dict)
         except Exception as e:
             notifier(f'{self.name}: Error updating order list with exit details. {e}', self.webhook_url)
 

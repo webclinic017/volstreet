@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 setup(
     name="autotrading",
-    version="0.1.0",
+    version="0.2.0",
     packages=find_packages(),
     install_requires=[
         "asttokens==2.2.1",
@@ -17,7 +17,7 @@ setup(
         "lxml==4.9.2",
         "matplotlib-inline==0.1.6",
         "nest-asyncio==1.5.6",
-        "numpy==1.24.1",
+        "numpy==1.24.2",
         "packaging==23.0",
         "pandas==1.5.3",
         "parso==0.8.3",
@@ -33,7 +33,7 @@ setup(
         "pywin32==305",
         "pyzmq==25.0.0",
         "requests==2.28.2",
-        "scipy==1.10.0",
+        "scipy==1.10.1",
         "six==1.16.0",
         "smartapi-python==1.3.0",
         "spyder-kernels==2.4.2",
@@ -42,7 +42,7 @@ setup(
         "traitlets==5.8.1",
         "urllib3==1.26.14",
         "wcwidth==0.2.6",
-        "websocket-client==1.5.0",
+        "websocket-client==1.5.1",
         "xlrd==2.0.1",
     ],
     classifiers=[

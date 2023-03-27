@@ -19,12 +19,9 @@ nifty = atf.Index('NIFTY', webhook_url=nifty_discord_url)
 bnf = atf.Index('BANKNIFTY', webhook_url=bnf_discord_url)
 
 # Rolling over the daily short straddle
-nifty.rollover_overnight_short_straddle(quantity_in_lots=30, multiple_of_orders=8, strike_offset=1.003)
+nifty.rollover_overnight_short_straddle(quantity_in_lots=10, strike_offset=1.003)
 sleep(1)
 
-# Rolling over the daily short butterfly
-nifty.rollover_short_butterfly(quantity_in_lots=20, multiple_of_orders=2)
-sleep(1)
 
 # Checking whether to buy the hedge and buying it if required
 if atf.timetoexpiry(nifty.current_expiry) * 365 < 1:
