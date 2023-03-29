@@ -9,10 +9,44 @@ from smartapi.smartExceptions import DataException
 import pyotp
 from threading import Thread
 from autotrader.SmartWebSocketV2 import SmartWebSocketV2
-from autotrader import scrips, holidays, blackscholes as bs, nsefunctions as nse
+from autotrader import scrips, holidays, blackscholes as bs
 from collections import defaultdict
+import yfinance as yf
 
 global login_data, obj, sws, price_dict
+
+
+def convert_to_serializable(data):
+    if isinstance(data, dict):
+        return {k: convert_to_serializable(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [convert_to_serializable(item) for item in data]
+    elif hasattr(data, 'tolist'):  # Check for numpy arrays
+        return data.tolist()
+    elif hasattr(data, 'item'):  # Check for numpy scalar types, e.g., numpy.int32
+        return data.item()
+    else:
+        return data
+
+
+def append_data_to_json(data_dict: defaultdict, file_name: str):
+    # Attempt to read the existing data from the JSON file
+    try:
+        with open(file_name, "r") as file:
+            data = json.load(file)
+    except (FileNotFoundError, json.JSONDecodeError):
+        # If the file doesn't exist or has invalid JSON content, create an empty list and write it to the file
+        data = []
+        with open(file_name, "w") as file:
+            json.dump(data, file)
+
+    # Convert the defaultdict to a regular dict, make it JSON serializable, and append it to the list
+    serializable_data = convert_to_serializable(dict(data_dict))
+    data.append(serializable_data)
+
+    # Write the updated data back to the JSON file with indentation
+    with open(file_name, "w") as file:
+        json.dump(data, file, indent=4)
 
 
 def login(user, pin, apikey, authkey, webhook_url=None):
@@ -500,6 +534,7 @@ class SharedData:
         self.orderbook_data = None
         self.updated_time = None
         self.error_info = None
+        self.force_stop = False
 
     def fetch_data(self):
         try:
@@ -512,7 +547,7 @@ class SharedData:
             self.error_info = e
 
     def update_data(self, sleep_time=5, exit_time=(15, 30)):
-        while currenttime().time() < time(*exit_time):
+        while currenttime().time() < time(*exit_time) and not self.force_stop:
             self.fetch_data()
             sleep(sleep_time)
 
@@ -559,19 +594,17 @@ class Index:
 
     def fetch_freeze_limit(self):
         try:
-            freeze_qty = nse.nse_fno(self.name)['vfq']
-            freeze_qty_in_lots = int(freeze_qty / self.lot_size)
-            assert freeze_qty_in_lots > 0
-            print('Freeze qty in lots: ', freeze_qty_in_lots, ' for ', self.name, ' fetched from nse api')
-            return freeze_qty_in_lots
-        except Exception as e:
-            print(e)
             freeze_qty_url = 'https://www1.nseindia.com/content/fo/qtyfreeze.xls'
             df = pd.read_excel(freeze_qty_url)
             df.columns = df.columns.str.strip()
             df['SYMBOL'] = df['SYMBOL'].str.strip()
             freeze_qty = df[df['SYMBOL'] == self.name]['VOL_FRZ_QTY'].values[0]
             freeze_qty_in_lots = freeze_qty / self.lot_size
+            return freeze_qty_in_lots
+        # Hard coding 30 lots if the freeze limit is not available
+        except Exception as e:
+            notifier(f'Error in fetching freeze limit for {self.name}: {e}', self.webhook_url)
+            freeze_qty_in_lots = 30
             return freeze_qty_in_lots
 
     def fetch_expirys(self):
@@ -697,8 +730,10 @@ class Index:
         call_order_statuses = lookup_and_return(orderbook, 'orderid', call_order_id_list, 'status')
         put_order_statuses = lookup_and_return(orderbook, 'orderid', put_order_id_list, 'status')
 
+        order_prefix = f'{order_tag}: ' if order_tag else ''
+
         if all(call_order_statuses == 'complete') and all(put_order_statuses == 'complete'):
-            notifier(f'{order_tag}: Order(s) placed successfully for {buy_or_sell} {self.name} ' +
+            notifier(f'{order_prefix}Order(s) placed successfully for {buy_or_sell} {self.name} ' +
                      f'{strike_info} {expiry} {quantity_in_lots} lot(s).', self.webhook_url)
             call_order_avg_price = lookup_and_return(orderbook, 'orderid',
                                                      call_order_id_list, 'averageprice').astype(float).mean()
@@ -709,11 +744,11 @@ class Index:
             else:
                 return
         elif all(call_order_statuses == 'rejected') and all(put_order_statuses == 'rejected'):
-            notifier(f'{order_tag}: All orders rejected for {buy_or_sell} {self.name} ' +
+            notifier(f'{order_prefix}All orders rejected for {buy_or_sell} {self.name} ' +
                      f'{strike_info} {expiry} {quantity_in_lots} lot(s).', self.webhook_url)
             raise Exception('Orders rejected')
         else:
-            notifier(f'{order_tag}: ERROR. Order statuses uncertain for {buy_or_sell} {self.name} ' +
+            notifier(f'{order_prefix}ERROR. Order statuses uncertain for {buy_or_sell} {self.name} ' +
                      f'{strike_info} {expiry} {quantity_in_lots} lot(s).', self.webhook_url)
             raise Exception('Order statuses uncertain')
 
@@ -901,6 +936,10 @@ class Index:
             with open('positions.json', 'w') as f:
                 json.dump(data, f)
 
+        vix = yf.Ticker('^INDIAVIX')
+        sleep(120)
+        vix = vix.fast_info['last_price']
+
         order_tag = 'Overnight Short Straddle'
 
         if timetoexpiry(self.current_expiry, effective_time=True, in_days=True) > 4:  # far from expiry
@@ -908,7 +947,6 @@ class Index:
             sell_strike = findstrike(ltp * strike_offset, self.base)
             call_ltp, put_ltp = fetch_straddle_price(self.name, self.current_expiry, sell_strike)
             iv = straddleiv(call_ltp, put_ltp, ltp, sell_strike, timetoexpiry(self.current_expiry))
-            vix = nse.indiavix()
             if iv < vix * iv_threshold:
                 notifier(f'IV is too low compared to VIX: IV {iv}, Vix {vix}.', self.webhook_url)
                 return
@@ -1061,7 +1099,10 @@ class Index:
                     underlying_price = self.fetch_ltp()
                     call_price = fetchltp('NFO', call_symbol, call_token)
                     put_price = fetchltp('NFO', put_symbol, put_token)
-                iv = straddleiv(call_price, put_price, underlying_price, equal_strike, timetoexpiry(expiry))
+                try:
+                    iv = straddleiv(call_price, put_price, underlying_price, equal_strike, timetoexpiry(expiry))
+                except ValueError:
+                    iv = 'Could not calculate IV'
                 if loop_number % 25 == 0:
                     print(f'Index: {self.name}\nTime: {currenttime().time()}\nStrike: {equal_strike}\n' +
                           f'Call SL: {call_sl_hit}\nPut SL: {put_sl_hit}\n' +

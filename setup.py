@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 setup(
     name="autotrading",
-    version="0.2.0",
+    version="0.2.1",
     packages=find_packages(),
     install_requires=[
         "asttokens==2.2.1",
@@ -44,6 +44,7 @@ setup(
         "wcwidth==0.2.6",
         "websocket-client==1.5.1",
         "xlrd==2.0.1",
+        "yfinance==0.2.14",
     ],
     classifiers=[
         "Programming Language :: Python :: 3",

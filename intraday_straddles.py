@@ -1,91 +1,59 @@
 from autotrader import autotradingfunctions as atf
 import threading
-import json
 from datetime import time
-import numpy as np
 
 discord_webhook_url = None
+user = ''
+pin = ''
+apikey = ''
+authkey = ''
 
-atf.login(user='user',
-          pin='pin',
-          apikey='apikey',
-          authkey='authkey',
-          webhook_url=None)
+atf.login(user=user, pin=pin, apikey=apikey, authkey=authkey)
 
-nifty = atf.Index('NIFTY', webhook_url=discord_webhook_url)
-bnf = atf.Index('BANKNIFTY', webhook_url=discord_webhook_url)
-finnifty = atf.Index('FINNIFTY', webhook_url=discord_webhook_url)
+indices = [atf.Index(index_name, webhook_url=discord_webhook_url) for index_name in ['FINNIFTY', 'NIFTY', 'BANKNIFTY']]
 shared_data = atf.SharedData()
 update_data_thread = threading.Thread(target=shared_data.update_data)
-update_data_thread.start()
 
+less_than_3_days = atf.timetoexpiry(indices[0].current_expiry, effective_time=True, in_days=True) < 3
+main_expiry = atf.timetoexpiry(indices[1].current_expiry, effective_time=True, in_days=True) < 1
+quantity_in_lots = 2
+exit_time = (15, 29, 15)
+monitor_sl = True
+move_sl = False
+wait_for_equality = False
 
-if atf.timetoexpiry(finnifty.current_expiry, effective_time=True, in_days=True) < 3:
-
-    nifty_straddle = threading.Thread(target=nifty.intraday_straddle,
-                                      kwargs={'quantity_in_lots': 5,
-                                              'monitor_sl': True,
-                                              'exit_time': (15, 28, 30),
-                                              'shared_data': shared_data})
-    bnf_straddle = threading.Thread(target=bnf.intraday_straddle,
-                                    kwargs={'quantity_in_lots': 5,
-                                            'monitor_sl': True,
-                                            'exit_time': (15, 28, 30),
-                                            'shared_data': shared_data})
-    finnifty_straddle = threading.Thread(target=finnifty.intraday_straddle,
-                                         kwargs={'quantity_in_lots': 5,
-                                                 'monitor_sl': True,
-                                                 'exit_time': (15, 28, 30),
-                                                 'shared_data': shared_data})
-else:
-
-    nifty_straddle = threading.Thread(target=nifty.intraday_straddle,
-                                      kwargs={'quantity_in_lots': 10,
-                                              'monitor_sl': True,
-                                              'exit_time': (15, 28, 30),
-                                              'shared_data': shared_data})
-    bnf_straddle = threading.Thread(target=bnf.intraday_straddle,
-                                    kwargs={'quantity_in_lots': 10,
-                                            'monitor_sl': True,
-                                            'exit_time': (15, 28, 30),
-                                            'shared_data': shared_data})
-    finnifty_straddle = False
+straddle_threads = []
+for index in indices:
+    if index.name == 'FINNIFTY' and (not less_than_3_days or main_expiry):
+        atf.notifier(f'Skipping {index.name} straddle.', discord_webhook_url)
+        index.traded = False
+        quantity_in_lots = int(quantity_in_lots * (3/2))
+        continue
+    thread = threading.Thread(target=index.intraday_straddle,
+                              kwargs={'quantity_in_lots': quantity_in_lots,
+                                      'wait_for_equality': wait_for_equality,
+                                      'monitor_sl': monitor_sl,
+                                      'move_sl': move_sl,
+                                      'exit_time': exit_time,
+                                      'shared_data': shared_data})
+    straddle_threads.append(thread)
+    index.traded = True
 
 while atf.currenttime().time() < time(9, 16):
     pass
 
-if nifty_straddle:
-    nifty_straddle.start()
-if bnf_straddle:
-    bnf_straddle.start()
-if finnifty_straddle:
-    finnifty_straddle.start()
+update_data_thread.start()
 
-if nifty_straddle:
-    nifty_straddle.join()
-if bnf_straddle:
-    bnf_straddle.join()
-if finnifty_straddle:
-    finnifty_straddle.join()
+for thread in straddle_threads:
+    thread.start()
 
-# Logging the trades
-order_list = []
-if nifty_straddle:
-    order_list.append(nifty.order_list[0])
-if bnf_straddle:
-    order_list.append(bnf.order_list[0])
-if finnifty_straddle:
-    order_list.append(finnifty.order_list[0])
+for thread in straddle_threads:
+    thread.join()
 
-with open(f"{atf.obj.userId}_order_log.txt", "a") as file:
-    for trade in order_list:
-        dump_data = {}
-        for key, value in trade.items():
-            if isinstance(value, np.int32) or isinstance(value, np.int64):
-                dump_data[key] = int(value)
-            elif isinstance(value, float):
-                dump_data[key] = float(value)
-            else:
-                dump_data[key] = value
-        file.write(json.dumps(dump_data) + "\n")
+shared_data.force_stop = True
+update_data_thread.join()
 
+# Call the data appender function on the traded indices
+for index in indices:
+    if index.traded:
+        atf.append_data_to_json(index.order_log, f'{user}_{index.name}_straddle_log.json')
