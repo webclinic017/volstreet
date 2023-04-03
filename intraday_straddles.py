@@ -8,7 +8,12 @@ pin = ''
 apikey = ''
 authkey = ''
 
-atf.login(user=user, pin=pin, apikey=apikey, authkey=authkey)
+# If today is a holiday, the script will exit
+if atf.currenttime().date() in atf.holidays:
+    atf.notifier('Today is a holiday. Exiting.', discord_webhook_url)
+    exit()
+
+atf.login(user=user, pin=pin, apikey=apikey, authkey=authkey, webhook_url=discord_webhook_url)
 
 indices = [atf.Index(index_name, webhook_url=discord_webhook_url) for index_name in ['FINNIFTY', 'NIFTY', 'BANKNIFTY']]
 shared_data = atf.SharedData()
@@ -24,11 +29,21 @@ wait_for_equality = False
 
 straddle_threads = []
 for index in indices:
-    if index.name == 'FINNIFTY' and (not less_than_3_days or main_expiry):
-        atf.notifier(f'Skipping {index.name} straddle.', discord_webhook_url)
-        index.traded = False
-        quantity_in_lots = int(quantity_in_lots * (3/2))
-        continue
+    if index.name == 'FINNIFTY':
+        if not main_expiry and less_than_3_days:
+            # If FINNIFTY is allowed to trade, update the quantity
+            quantity_in_lots = quantity_in_lots * 2
+        else:
+            atf.notifier(f'Skipping {index.name} straddle.', discord_webhook_url)
+            index.traded = False
+            continue
+    else:
+        # If FINNIFTY is allowed to trade, skip other indices
+        if not main_expiry and less_than_3_days:
+            atf.notifier(f'Skipping {index.name} straddle.', discord_webhook_url)
+            index.traded = False
+            continue
+
     thread = threading.Thread(target=index.intraday_straddle,
                               kwargs={'quantity_in_lots': quantity_in_lots,
                                       'wait_for_equality': wait_for_equality,

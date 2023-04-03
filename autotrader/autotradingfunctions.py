@@ -594,14 +594,23 @@ class Index:
 
     def fetch_freeze_limit(self):
         try:
-            freeze_qty_url = 'https://www1.nseindia.com/content/fo/qtyfreeze.xls'
-            df = pd.read_excel(freeze_qty_url)
+            freeze_qty_url = 'https://archives.nseindia.com/content/fo/qtyfreeze.xls'
+            response = requests.get(freeze_qty_url, timeout=10)  # Set the timeout value
+            response.raise_for_status()  # Raise an exception if the response contains an HTTP error status
+            df = pd.read_excel(response.content)
             df.columns = df.columns.str.strip()
             df['SYMBOL'] = df['SYMBOL'].str.strip()
             freeze_qty = df[df['SYMBOL'] == self.name]['VOL_FRZ_QTY'].values[0]
             freeze_qty_in_lots = freeze_qty / self.lot_size
             return freeze_qty_in_lots
-        # Hard coding 30 lots if the freeze limit is not available
+        except requests.exceptions.Timeout as e:
+            notifier(f'Timeout error in fetching freeze limit for {self.name}: {e}', self.webhook_url)
+            freeze_qty_in_lots = 30
+            return freeze_qty_in_lots
+        except requests.exceptions.HTTPError as e:
+            notifier(f'HTTP error in fetching freeze limit for {self.name}: {e}', self.webhook_url)
+            freeze_qty_in_lots = 30
+            return freeze_qty_in_lots
         except Exception as e:
             notifier(f'Error in fetching freeze limit for {self.name}: {e}', self.webhook_url)
             freeze_qty_in_lots = 30
