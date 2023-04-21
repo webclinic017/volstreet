@@ -1,12 +1,26 @@
 from autotrader import autotradingfunctions as atf
 import threading
 from datetime import time
+from autotrader.discord_bot import run_bot
 
+# User inputs
 discord_webhook_url = None
+discord_bot_token = ''
 user = ''
 pin = ''
 apikey = ''
 authkey = ''
+
+# Trade inputs
+quantity_in_lots = 5
+exit_time = (15, 26, 00)
+move_sl = False
+stoploss = 'dynamic'
+wait_for_equality = False
+target_disparity = 2
+catch_trend = False
+take_profit = False
+take_profit_points = 3
 
 # If today is a holiday, the script will exit
 if atf.currenttime().date() in atf.holidays:
@@ -21,11 +35,6 @@ update_data_thread = threading.Thread(target=shared_data.update_data)
 
 less_than_3_days = atf.timetoexpiry(indices[0].current_expiry, effective_time=True, in_days=True) < 3
 main_expiry = atf.timetoexpiry(indices[1].current_expiry, effective_time=True, in_days=True) < 1
-quantity_in_lots = 2
-exit_time = (15, 29, 15)
-monitor_sl = True
-move_sl = False
-wait_for_equality = False
 
 straddle_threads = []
 for index in indices:
@@ -47,18 +56,30 @@ for index in indices:
     thread = threading.Thread(target=index.intraday_straddle,
                               kwargs={'quantity_in_lots': quantity_in_lots,
                                       'wait_for_equality': wait_for_equality,
-                                      'monitor_sl': monitor_sl,
                                       'move_sl': move_sl,
                                       'exit_time': exit_time,
-                                      'shared_data': shared_data})
+                                      'shared_data': shared_data,
+                                      'catch_trend': catch_trend,
+                                      'stoploss': stoploss,
+                                      'target_disparity': target_disparity,
+                                      'take_profit': take_profit,
+                                      'take_profit_points': take_profit_points})
     straddle_threads.append(thread)
     index.traded = True
 
+# Start the discord bot
+discord_bot_thread = threading.Thread(target=run_bot, args=(discord_bot_token, indices))
+discord_bot_thread.daemon = True
+discord_bot_thread.start()
+
+# Wait for the market to open
 while atf.currenttime().time() < time(9, 16):
     pass
 
+# Start the data updater thread
 update_data_thread.start()
 
+# Start the straddle threads
 for thread in straddle_threads:
     thread.start()
 

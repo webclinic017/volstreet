@@ -15,6 +15,8 @@ import yfinance as yf
 
 global login_data, obj, sws, price_dict
 
+large_order_threshold = 10
+
 
 def convert_to_serializable(data):
     if isinstance(data, dict):
@@ -572,6 +574,8 @@ class Index:
         self.fetch_expirys()
         self.freeze_qty = self.fetch_freeze_limit()
 
+        self._intraday_straddle_forced_exit = False
+
         if self.name == 'BANKNIFTY':
             self.base = 100
             self.exchange_type = 1
@@ -671,7 +675,7 @@ class Index:
 
         if quantity_in_lots > self.freeze_qty:
             loops = int(quantity_in_lots / self.freeze_qty)
-            if loops > 10:
+            if loops > large_order_threshold:
                 raise Exception('Order too big. This error was raised to prevent accidental large order placement.')
 
             remainder = quantity_in_lots % self.freeze_qty
@@ -801,7 +805,7 @@ class Index:
         else:
             print(f'Synthetic Futs: {buy_or_sell} Order for {quantity} quantity completed.')
 
-    def find_equal_strike(self, exit_time, websocket, wait_for_equality, **kwargs):
+    def find_equal_strike(self, exit_time, websocket, wait_for_equality, target_disparity, expiry=None):
 
         """Finds the strike price that is equal to the current index price at the time of exit.
 
@@ -813,6 +817,11 @@ class Index:
 
         Returns:
         strike, call symbol, put symbol , call token, put token, call ltp, put ltp"""
+
+        if expiry is None:
+            expiry = self.current_expiry
+        else:
+            expiry = expiry
 
         if websocket:
 
@@ -827,8 +836,8 @@ class Index:
             strike_list = []
 
             for strike in strike_range:
-                call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} CE')
-                put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {self.current_expiry} PE')
+                call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {expiry} CE')
+                put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {expiry} PE')
                 call_token_list.append(call_token)
                 put_token_list.append(put_token)
                 call_symbol_list.append(call_symbol)
@@ -849,7 +858,7 @@ class Index:
             if wait_for_equality:
 
                 loop_number = 1
-                while np.min(disparities) > kwargs['target_disparity']:
+                while np.min(disparities) > target_disparity:
                     call_ltps = np.array(
                         [price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
                     put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
@@ -893,8 +902,8 @@ class Index:
             disparity_dict = {}
 
             def update_disparity_dict(stk, mydict):
-                c_symbol, c_token = fetch_symbol_token(f'{self.name} {stk} {self.current_expiry} CE')
-                p_symbol, p_token = fetch_symbol_token(f'{self.name} {stk} {self.current_expiry} PE')
+                c_symbol, c_token = fetch_symbol_token(f'{self.name} {stk} {expiry} CE')
+                p_symbol, p_token = fetch_symbol_token(f'{self.name} {stk} {expiry} PE')
                 c_price = fetchltp('NFO', c_symbol, c_token)
                 p_price = fetchltp('NFO', p_symbol, p_token)
                 disparity = abs(c_price - p_price) / min(c_price, p_price) * 100
@@ -906,7 +915,7 @@ class Index:
 
             if wait_for_equality:
 
-                while min(disparity_dict.values())[0] > kwargs['target_disparity']:
+                while min(disparity_dict.values())[0] > target_disparity:
                     for strike in strike_range:
                         update_disparity_dict(strike, disparity_dict)
                     if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
@@ -961,6 +970,7 @@ class Index:
                 return
             else:
                 notifier(f'IV is fine compared to VIX: IV {iv}, Vix {vix}.', self.webhook_url)
+                return
         elif timetoexpiry(self.current_expiry, effective_time=True, in_days=True) < 2:  # only exit
             sell_strike = None
         else:
@@ -1024,7 +1034,9 @@ class Index:
                                       order_tag='Weekly hedge')
 
     def intraday_straddle(self, quantity_in_lots, exit_time=(15, 28), websocket=False, wait_for_equality=False,
-                          monitor_sl=False, move_sl=False, shared_data=None, **kwargs):
+                          move_sl=False, shared_data=None, stoploss='dynamic', target_disparity=10,
+                          catch_trend=False, take_profit=False, trend_qty_ratio=0.5, trend_catcher_sl=0.003,
+                          take_profit_points=np.inf):
 
         """Params:
         quantity_in_lots: Quantity in lots
@@ -1033,20 +1045,23 @@ class Index:
         wait_for_equality: Whether to wait for the option prices to be equal | Default: False
         monitor_sl: Whether to monitor stop loss | Default: False
         move_sl: Whether to move stop loss | Default: False
-        kwargs: 'stoploss': Stop loss  | Default: 1.5 and 1.7 on expiries, 'target_disparity':
-        Target disparity"""
+        shared_data: Shared data class to be shared between threads | Default: None
+        stoploss: Type of stoploss to be used | Default: 'dynamic'
+        target_disparity: Target disparity between call and put | Default: 10"""
 
         order_tag = 'Intraday straddle'
+        expiry = self.current_expiry
 
         # Splicing orders
         spliced_orders = self.splice_orders(quantity_in_lots)
 
-        # Finding equal strike, setting expiry
+        # Finding equal strike
         equal_strike, call_symbol, \
             call_token, put_symbol, \
             put_token, call_price, put_price = self.find_equal_strike(exit_time=exit_time, websocket=websocket,
-                                                                      wait_for_equality=wait_for_equality, **kwargs)
-        expiry = self.current_expiry
+                                                                      wait_for_equality=wait_for_equality,
+                                                                      target_disparity=target_disparity,
+                                                                      expiry=expiry)
 
         notifier(f'{self.name}: Initiating intraday trade on {equal_strike} strike.', self.webhook_url)
 
@@ -1054,15 +1069,26 @@ class Index:
         call_avg_price, put_avg_price = self.place_combined_order(expiry, 'SELL', quantity_in_lots, strike=equal_strike,
                                                                   return_avg_price=True, order_tag=order_tag)
 
-        if 'stoploss' in kwargs:
-            sl = kwargs['stoploss']
-        else:
-            if timetoexpiry(self.current_expiry) * 365 < 1 or self.name == 'BANKNIFTY':
-                sl = 1.7
-            else:
-                sl = 1.5
+        underlying_price = self.fetch_ltp()
 
         # Placing stoploss orders
+        if stoploss == 'fixed':
+            if self.name == 'BANKNIFTY':
+                sl = 1.7
+            elif self.name == 'NIFTY':
+                sl = 1.5
+            else:
+                sl = 1.6
+        elif stoploss == 'dynamic':
+            if self.name == 'BANKNIFTY' or timetoexpiry(expiry, in_days=True) < 1:
+                sl = 1.7
+            elif self.name == 'NIFTY':
+                sl = 1.5
+            else:
+                sl = 1.6
+        else:
+            sl = stoploss
+
         call_stoploss_order_ids = []
         put_stoploss_order_ids = []
         for quantity in spliced_orders:
@@ -1086,19 +1112,21 @@ class Index:
 
         self.log_order(equal_strike, expiry, 'SELL', call_avg_price, put_avg_price, order_tag)
         summary_message = '\n'.join(f'{k}: {v}' for k, v in self.order_log[order_tag][0].items())
+        try:
+            traded_iv = straddleiv(call_price, put_price, self.fetch_ltp(), equal_strike, timetoexpiry(expiry))
+        except ValueError:
+            traded_iv = 'NA'
+        summary_message += f'\nTraded IV: {traded_iv}'
         notifier(summary_message, self.webhook_url)
         sleep(1)
 
-        # After placing the orders and stoploss orders
-        in_trade = True
-        call_sl_hit = False
-        put_sl_hit = False
-        error_faced = False
-
         def price_tracker():
 
-            nonlocal call_price, put_price
-            loop_number = 0
+            nonlocal call_price, put_price, underlying_price, call_avg_price, put_avg_price, sl_hit_dict, smart_exit
+            nonlocal call_exit_price, put_exit_price
+
+            last_print_time = currenttime()
+            print_interval = timedelta(seconds=5)
             while in_trade and not error_faced:
                 if websocket:
                     underlying_price = price_dict.get(self.token, 0)['ltp']
@@ -1112,185 +1140,255 @@ class Index:
                     iv = straddleiv(call_price, put_price, underlying_price, equal_strike, timetoexpiry(expiry))
                 except ValueError:
                     iv = 'Could not calculate IV'
-                if loop_number % 25 == 0:
-                    print(f'Index: {self.name}\nTime: {currenttime().time()}\nStrike: {equal_strike}\n' +
-                          f'Call SL: {call_sl_hit}\nPut SL: {put_sl_hit}\n' +
-                          f'Call Price: {call_price}\nPut Price: {put_price}\n' +
-                          f'Total price: {call_price + put_price}\nIV: {iv}\n')
-                loop_number += 1
+                callsl = sl_hit_dict['call']
+                putsl = sl_hit_dict['put']
 
-        price_updater = Thread(target=price_tracker)
-
-        if monitor_sl:
-
-            price_updater.start()
-
-            def check_sl_orders(order_ids, side, data=shared_data):
-
-                nonlocal orderbook
-                # If first time checking, fetch orderbook and do not use shared data
-                if data is None:
-                    orderbook = fetch_book('orderbook')
-                # If not first time checking, use shared data if it is not too old
+                if not callsl and not putsl:
+                    ce_exit_price = call_price
+                    pe_exit_price = put_price
+                    stoploss_message = ''
+                elif callsl and not putsl:
+                    ce_exit_price = call_exit_price
+                    pe_exit_price = put_price
+                    stoploss_message = f'Call Exit Price: {ce_exit_price}\n'
+                elif putsl and not callsl:
+                    ce_exit_price = call_price
+                    pe_exit_price = put_exit_price
+                    stoploss_message = f'Put Exit Price: {pe_exit_price}\n'
                 else:
-                    if currenttime() - data.updated_time < timedelta(seconds=15) and data.orderbook_data is not None:
-                        # print(f'{self.name} {side} Using shared data. Updated at {data.updated_time:%H:%M:%S}')
-                        orderbook = data.orderbook_data
-                    else:
-                        orderbook = fetch_book('orderbook')
+                    ce_exit_price = call_exit_price
+                    pe_exit_price = put_exit_price
+                    stoploss_message = f'Call Exit Price: {ce_exit_price}\nPut Exit Price: {pe_exit_price}\n'
 
-                statuses = lookup_and_return(orderbook, 'orderid', order_ids, 'status')
-                sleep(1)
+                profit_in_pts = (call_avg_price + put_avg_price) - (ce_exit_price + pe_exit_price)
+                profit_in_rs = profit_in_pts * self.lot_size * quantity_in_lots
 
-                if all(statuses == 'trigger pending'):
-                    return False, False
+                if currenttime() - last_print_time > print_interval:
+                    print(f'Index: {self.name}\nTime: {currenttime().time()}\nStrike: {equal_strike}\n' +
+                          f'Underlying Price: {underlying_price}\nCall SL: {callsl}\nPut SL: {putsl}\n' +
+                          f'Call Price: {call_price}\nPut Price: {put_price}\n' +
+                          stoploss_message +
+                          f'Total price: {call_price + put_price}\nProfit in points: {profit_in_pts}\n' +
+                          f'Profit Value: {profit_in_rs}\nIV: {iv}\n')
+                    last_print_time = currenttime()
 
-                elif all(statuses == 'rejected') or all(statuses == 'cancelled'):
-                    rejection_reason = lookup_and_return(orderbook, 'orderid', order_ids, 'text')
-                    if all(rejection_reason == '17070 : The Price is out of the LPP range'):
-                        notifier(f'{self.name} {side} stoploss orders triggered but rejected ' +
-                                 f'due to LPP range.', self.webhook_url)
-                    else:
-                        notifier(f'{self.name} {side} stoploss orders rejected due to other reason.', self.webhook_url)
-                        raise Exception(f'{side} stoploss orders rejected')
-                    return True, False
+                if take_profit and profit_in_pts > take_profit_points:
+                    notifier(f'{self.name} smart exit triggered. Profit: {profit_in_pts}', self.webhook_url)
+                    smart_exit = True
 
-                elif all(statuses == 'pending'):
+        def check_sl_orders(order_ids, side, data=shared_data, refresh=False):
 
-                    # Confirm pending orders
-                    sleep(1)
+            nonlocal orderbook, call_exit_price, put_exit_price, call_price, put_price
+            # If checking for the first time or need latest orderbook, fetch it and do not use shared data
+            if data is None or refresh:
+                orderbook = fetch_book('orderbook')
+            # Use shared data if it is not too old
+            else:
+                if currenttime() - data.updated_time < timedelta(seconds=15) and data.orderbook_data is not None:
+                    # print(f'{self.name} {side} Using shared data. Updated at {data.updated_time:%H:%M:%S}')
+                    orderbook = data.orderbook_data
+                else:
                     orderbook = fetch_book('orderbook')
-                    statuses = lookup_and_return(orderbook, 'orderid', order_ids, 'status')
 
-                    if all(statuses == 'pending'):
+            statuses = lookup_and_return(orderbook, 'orderid', order_ids, 'status')
+            sleep(1)
 
-                        notifier(f'{self.name} {side} stoploss orders triggered but pending. ' +
-                                 f'Cancelling orders and placing market orders', self.webhook_url)
-                        for order_id in order_ids:
-                            try:
-                                obj.cancelOrder(order_id, 'STOPLOSS')
-                            except Exception as e:
-                                notifier(f'{self.name} {side} stoploss order {order_id} cancellation failed. ' +
-                                         f'Error: {e}', self.webhook_url)
-                                raise Exception(f'{side} stoploss order {order_id} cancellation failed. Error: {e}')
-                        return True, False
-                    elif all(statuses == 'complete'):
-                        notifier(f'{self.name} {side} stoploss orders triggered and completed.', self.webhook_url)
-                        return True, True
+            if all(statuses == 'trigger pending'):
+                return False, False
+
+            elif all(statuses == 'rejected') or all(statuses == 'cancelled'):
+                rejection_reason = lookup_and_return(orderbook, 'orderid', order_ids, 'text')
+                if all(rejection_reason == '17070 : The Price is out of the LPP range'):
+                    notifier(f'{self.name} {side} stoploss orders triggered but rejected ' +
+                             f'due to LPP range.', self.webhook_url)
+                else:
+                    notifier(f'{self.name} {side} stoploss orders rejected due to other reason.', self.webhook_url)
+                    raise Exception(f'{side} stoploss orders rejected')
+                exit_price = call_price if side == 'call' else put_price
+                if side == 'call':
+                    call_exit_price = exit_price
+                else:
+                    put_exit_price = exit_price
+                return True, False
+
+            elif all(statuses == 'pending'):
+
+                # Confirm pending orders
+                sleep(1)
+                orderbook = fetch_book('orderbook')
+                statuses = lookup_and_return(orderbook, 'orderid', order_ids, 'status')
+
+                if all(statuses == 'pending'):
+                    notifier(f'{self.name} {side} stoploss orders triggered but pending. ' +
+                             f'Cancelling orders and placing market orders', self.webhook_url)
+                    for order_id in order_ids:
+                        try:
+                            obj.cancelOrder(order_id, 'STOPLOSS')
+                        except Exception as e:
+                            notifier(f'{self.name} {side} stoploss order {order_id} cancellation failed. ' +
+                                     f'Error: {e}', self.webhook_url)
+                            raise Exception(f'{side} stoploss order {order_id} cancellation failed. Error: {e}')
+
+                    exit_price = call_price if side == 'call' else put_price
+                    if side == 'call':
+                        call_exit_price = exit_price
                     else:
-                        notifier(f'{self.name} {side} stoploss orders pending due to price jump. ' +
-                                 f'But order status is not pending or complete. Statuses: {statuses}', self.webhook_url)
-                        raise Exception(f'{side} stoploss orders pending due to price jump. ' +
-                                        f'But order status is not pending or complete. Statuses: {statuses}')
-
+                        put_exit_price = exit_price
+                    return True, False
                 elif all(statuses == 'complete'):
                     notifier(f'{self.name} {side} stoploss orders triggered and completed.', self.webhook_url)
+                    exit_price = lookup_and_return(orderbook, 'orderid', order_ids, 'averageprice').astype(float).mean()
+                    if side == 'call':
+                        call_exit_price = exit_price
+                    else:
+                        put_exit_price = exit_price
                     return True, True
-
                 else:
-                    notifier(f'{self.name} {side} stoploss orders in unknown state.', self.webhook_url)
-                    raise Exception(f'{side} stoploss orders in unknown state.')
+                    notifier(f'{self.name} {side} stoploss orders pending due to price jump. ' +
+                             f'But order status is not pending or complete. Statuses: {statuses}', self.webhook_url)
+                    raise Exception(f'{side} stoploss orders pending due to price jump. ' +
+                                    f'But order status is not pending or complete. Statuses: {statuses}')
 
-            sleep(10)
-            # Monitoring begins here
-            while currenttime().time() < time(*exit_time) and not call_sl_hit and not put_sl_hit:
-                try:
-                    call_sl_hit, call_sl_orders_complete = check_sl_orders(call_stoploss_order_ids, 'call')
-                    put_sl_hit, put_sl_orders_complete = check_sl_orders(put_stoploss_order_ids, 'put')
-                except Exception as e:
-                    notifier(f'{self.name} Error: {e}', self.webhook_url)
-                    error_faced = True
-                    price_updater.join()
-                    raise Exception(f'Error: {e}')
-
-                if call_sl_hit:
-
-                    if call_sl_orders_complete:
-                        pass
-                    else:
-                        for quantity in spliced_orders:
-                            placeorder(call_symbol, call_token, quantity * self.lot_size,
-                                       'BUY', 'MARKET')
-
-                    if move_sl:
-                        # Cancelling and placing new put sl orders
-                        for orderid in put_stoploss_order_ids:
-                            obj.cancelOrder(orderid, 'STOPLOSS')
-                        put_stoploss_order_ids = []
-                        for quantity in spliced_orders:
-                            put_sl_order_id = placeSLorder(put_symbol, put_token, quantity * self.lot_size,
-                                                           'BUY', put_avg_price, 'Stoploss put')
-                            put_stoploss_order_ids.append(put_sl_order_id)
-
-                    # Monitoring second stoploss
-                    while currenttime().time() < time(*exit_time):
-                        put_sl_hit, put_sl_orders_complete = check_sl_orders(put_stoploss_order_ids, 'put')
-                        if put_sl_hit:
-                            if put_sl_orders_complete:
-                                pass
-                            else:
-                                for quantity in spliced_orders:
-                                    placeorder(put_symbol, put_token, quantity * self.lot_size,
-                                               'BUY', 'MARKET')
-                            break
-                        else:
-                            # print(f'{self.name} put stoploss not triggered yet')
-                            sleep(5)
-
-                elif put_sl_hit:
-
-                    if put_sl_orders_complete:
-                        pass
-                    else:
-                        for quantity in spliced_orders:
-                            placeorder(put_symbol, put_token, quantity * self.lot_size,
-                                       'BUY', 'MARKET')
-
-                    if move_sl:
-                        # Cancelling and placing new put sl orders
-                        for orderid in call_stoploss_order_ids:
-                            obj.cancelOrder(orderid, 'STOPLOSS')
-                        call_stoploss_order_ids = []
-                        for quantity in spliced_orders:
-                            call_sl_order_id = placeSLorder(call_symbol, call_token, quantity * self.lot_size,
-                                                            'BUY', call_avg_price, 'Stoploss call')
-                            call_stoploss_order_ids.append(call_sl_order_id)
-
-                    # Monitoring second stoploss
-                    while currenttime().time() < time(*exit_time):
-                        call_sl_hit, call_sl_orders_complete = check_sl_orders(call_stoploss_order_ids, 'call')
-                        if call_sl_hit:
-                            if call_sl_orders_complete:
-                                pass
-                            else:
-                                for quantity in spliced_orders:
-                                    placeorder(call_symbol, call_token, quantity * self.lot_size,
-                                               'BUY', 'MARKET')
-                            break
-                        else:
-                            # print(f'{self.name} call stoploss not triggered yet')
-                            sleep(5)
+            elif all(statuses == 'complete'):
+                notifier(f'{self.name} {side} stoploss orders triggered and completed.', self.webhook_url)
+                exit_price = lookup_and_return(orderbook, 'orderid', order_ids, 'averageprice').astype(float).mean()
+                if side == 'call':
+                    call_exit_price = exit_price
                 else:
-                    current_time = currenttime().time().strftime('%H:%M:%S')
-                    # print(f'{current_time} {self.name} stoplosses not triggered')
+                    put_exit_price = exit_price
+                return True, True
+
+            else:
+                notifier(f'{self.name} {side} stoploss orders in unknown state.', self.webhook_url)
+                raise Exception(f'{side} stoploss orders in unknown state.')
+
+        def check_exit_conditions(time_now, time_of_exit, *bools):
+            return time_now >= time_of_exit or any(bools)
+
+        def trend_catcher(sl_type, qty_ratio, trend_sl):
+
+            nonlocal underlying_price, smart_exit, in_trade
+
+            strike = findstrike(underlying_price, self.base)
+            opt_type = "PE" if sl_type == "call" else "CE"
+            symbol, token = fetch_symbol_token(
+                f'{self.name} {strike} {expiry} {opt_type}')
+            option_ltp = fetchltp('NFO', symbol, token)
+            qty = max(int(quantity_in_lots * qty_ratio), 1)
+            trend_spliced_orders = self.splice_orders(qty)
+            for qty in trend_spliced_orders:
+                placeorder(symbol, token, qty * self.lot_size, 'SELL', option_ltp * 0.9)
+            sl_price = (underlying_price * (1 - trend_sl)) if sl_type == 'call' else (underlying_price * (1 + trend_sl))
+            notifier(f'{self.name} {sl_type} trend catcher starting. ' +
+                     f'Placed {qty} lots of {strike} {opt_type} at {option_ltp}. ' +
+                     f'Stoploss price: {sl_price}, Underlying Price: {underlying_price}', self.webhook_url)
+            trend_sl_hit = False
+            last_print_time = currenttime()
+            print_interval = timedelta(seconds=10)
+            while not check_exit_conditions(currenttime().time(), time(*exit_time), trend_sl_hit,
+                                            self._intraday_straddle_forced_exit, smart_exit, not in_trade):
+
+                if sl_type == 'call':
+                    trend_sl_hit = underlying_price < sl_price
+                else:
+                    trend_sl_hit = underlying_price > sl_price
+                sleep(1)
+                if currenttime() - last_print_time > print_interval:
+                    last_print_time = currenttime()
+                    print(f'{self.name} {sl_type} trend catcher running. ' +
+                          f'Stoploss price: {sl_price}, Underlying Price: {underlying_price} ' +
+                          f'Stoploss hit: {trend_sl_hit}')
+
+            if trend_sl_hit:
+                notifier(f'{self.name} {sl_type} trend catcher stoploss hit.', self.webhook_url)
+            else:
+                notifier(f'{self.name} {sl_type} trend catcher exiting.', self.webhook_url)
+
+            for qty in trend_spliced_orders:
+                placeorder(symbol, token, qty * self.lot_size, 'BUY', 'MARKET')
+
+        def process_sl_hit(sl_type, sl_dict, sl_orders_complete, symbol, token, other_symbol,
+                           other_token, other_stoploss_order_ids, other_avg_price):
+
+            nonlocal smart_exit
+
+            if all(sl_dict.values()):
+                # print(f'{self.name} both stoploss orders completed. Not processing {sl_type}.')
+                return
+
+            other_sl_type = 'call' if sl_type == 'put' else 'put'
+
+            if not sl_orders_complete:
+                for qty in spliced_orders:
+                    placeorder(symbol, token, qty * self.lot_size, 'BUY', 'MARKET')
+
+            if move_sl:
+                for o_id in other_stoploss_order_ids:
+                    obj.cancelOrder(o_id, 'STOPLOSS')
+
+                other_stoploss_order_ids.clear()
+                for qty in spliced_orders:
+                    sl_order_id = placeSLorder(other_symbol, other_token, qty * self.lot_size,
+                                               'BUY', other_avg_price, f'Stoploss {other_sl_type}')
+                    other_stoploss_order_ids.append(sl_order_id)
+
+            if catch_trend:
+                trend_thread = Thread(target=trend_catcher, args=(sl_type, trend_qty_ratio, trend_catcher_sl))
+                trend_thread.start()
+
+            refresh = True
+            while not check_exit_conditions(currenttime().time(), time(*exit_time), sl_dict[other_sl_type],
+                                            self._intraday_straddle_forced_exit, smart_exit):
+
+                sl_dict[other_sl_type], other_sl_orders_complete = check_sl_orders(other_stoploss_order_ids,
+                                                                                   other_sl_type,
+                                                                                   refresh=refresh)
+                if sl_dict[other_sl_type]:
+                    if not other_sl_orders_complete:
+                        for qty in spliced_orders:
+                            placeorder(other_symbol, other_token, qty * self.lot_size, 'BUY', 'MARKET')
+                    break
+                else:
                     sleep(5)
+                refresh = False
 
-        else:
+        # After placing the orders and stoploss orders
+        in_trade = True
+        call_sl_hit = False
+        put_sl_hit = False
+        error_faced = False
+        smart_exit = False
+        call_exit_price = None
+        put_exit_price = None
 
-            while currenttime().time() < time(*exit_time):
-                current_time = currenttime().time().strftime('%H:%M:%S')
-                print(f'{current_time} {self.name} - Waiting for exit time')
-                sleep(15)
+        sl_hit_dict = {'call': call_sl_hit, 'put': put_sl_hit}
+        price_updater = Thread(target=price_tracker)
+        price_updater.start()
 
-            # Checking which stoplosses orders were triggered
-            sleep(1)
-            orderbook = fetch_book('orderbook')
+        sleep(6)
 
-            call_sl_statuses = lookup_and_return(orderbook, 'orderid', call_stoploss_order_ids, 'status')
-            put_sl_statuses = lookup_and_return(orderbook, 'orderid', put_stoploss_order_ids, 'status')
+        # Monitoring begins here
+        while not check_exit_conditions(currenttime().time(), time(*exit_time), any(sl_hit_dict.values()),
+                                        self._intraday_straddle_forced_exit, smart_exit):
+            try:
+                sl_hit_dict['call'], call_sl_orders_complete = check_sl_orders(call_stoploss_order_ids, 'call')
+                sl_hit_dict['put'], put_sl_orders_complete = check_sl_orders(put_stoploss_order_ids, 'put')
+            except Exception as e:
+                notifier(f'{self.name} Error: {e}', self.webhook_url)
+                error_faced = True
+                price_updater.join()
+                raise Exception(f'Error: {e}')
 
-            call_sl_hit = all(call_sl_statuses == 'complete')
-            put_sl_hit = all(put_sl_statuses == 'complete')
+            if sl_hit_dict['call']:
+                process_sl_hit('call', sl_hit_dict, call_sl_orders_complete, call_symbol, call_token,
+                               put_symbol, put_token, put_stoploss_order_ids, put_avg_price)
+
+            if sl_hit_dict['put']:
+                process_sl_hit('put', sl_hit_dict, put_sl_orders_complete, put_symbol, put_token,
+                               call_symbol, call_token, call_stoploss_order_ids, call_avg_price)
+            sleep(5)
+
+        call_sl_hit, put_sl_hit = sl_hit_dict['call'], sl_hit_dict['put']
 
         # Cancelling pending stoploss orders
         if call_sl_hit and put_sl_hit:
