@@ -417,6 +417,26 @@ def calc_greeks(position_string, position_price, underlying_price):
     return iv, delta, gamma
 
 
+def charges(buy_premium, contract_size, num_contracts):
+    buy_brokerage = 20
+    sell_brokerage = 20
+    transaction_charge_rate = 0.05 / 100
+    stt_ctt_rate = 0.0625 / 100
+    gst_rate = 18 / 100
+
+    buy_transaction_charges = buy_premium * contract_size * num_contracts * transaction_charge_rate
+    sell_transaction_charges = buy_premium * contract_size * num_contracts * transaction_charge_rate
+    stt_ctt = buy_premium * contract_size * num_contracts * stt_ctt_rate
+
+    buy_gst = (buy_brokerage + buy_transaction_charges) * gst_rate
+    sell_gst = (sell_brokerage + sell_transaction_charges) * gst_rate
+
+    total_charges = buy_brokerage + sell_brokerage + buy_transaction_charges + sell_transaction_charges + stt_ctt + buy_gst + sell_gst
+    charges_per_share = total_charges / (num_contracts * contract_size)
+
+    return charges_per_share
+
+
 # ORDER FUNCTIONS BELOW #
 
 def placeorder(symbol, token, qty, buyorsell, orderprice, ordertag=""):
@@ -807,6 +827,95 @@ class Index:
 
     def find_equal_strike(self, exit_time, websocket, wait_for_equality, target_disparity, expiry=None):
 
+        expiry = expiry or self.current_expiry
+        ltp = self.fetch_ltp() if not websocket else price_dict.get(self.token, 0)['ltp']
+        current_strike = findstrike(ltp, self.base)
+        strike_range = np.arange(current_strike - self.base * 2, current_strike + self.base * 2, self.base)
+
+        def fetch_data(strike, exp):
+            c_symbol, c_token = fetch_symbol_token(f'{self.name} {strike} {exp} CE')
+            p_symbol, p_token = fetch_symbol_token(f'{self.name} {strike} {exp} PE')
+            return c_symbol, c_token, p_symbol, p_token
+
+        def fetch_ltps(tokens, symbols, socket):
+            if socket:
+                return np.array([price_dict.get(token, {'ltp': 0})['ltp'] for token in tokens])
+            else:
+                return np.array([fetchltp('NFO', symbol, token) for symbol, token in zip(symbols, tokens)])
+
+        def compute_disparities(c_ltps, p_ltps):
+            return np.abs(c_ltps - p_ltps) / np.minimum(c_ltps, p_ltps) * 100
+
+        data = [fetch_data(strike, expiry) for strike in strike_range]
+        call_token_list, put_token_list = zip(*(tokens[1:4:2] for tokens in data))
+        call_symbol_list, put_symbol_list = zip(*(symbols[0:3:2] for symbols in data))
+
+        if websocket:
+            sws.subscribe('websocket', 1, [{'exchangeType': 2, 'tokens': list(call_token_list) + list(put_token_list)}])
+            sleep(3)
+
+        call_ltps, put_ltps = fetch_ltps(call_token_list, call_symbol_list, websocket), fetch_ltps(put_token_list,
+                                                                                                   put_symbol_list,
+                                                                                                   websocket)
+        disparities = compute_disparities(call_ltps, put_ltps)
+
+        if wait_for_equality:
+            last_print_time = currenttime()
+            print_interval = timedelta(seconds=0.0005)
+            min_disparity_idx = np.argmin(disparities)
+            min_disparity = disparities[min_disparity_idx]
+
+            while min_disparity > target_disparity:
+                if min_disparity < 10:
+                    # Update only the minimum disparity strike data
+                    call_ltp, put_ltp = fetch_ltps([call_token_list[min_disparity_idx]],
+                                                   call_symbol_list[min_disparity_idx], websocket), \
+                        fetch_ltps([put_token_list[min_disparity_idx]], put_symbol_list[min_disparity_idx], websocket)
+                    disparities[min_disparity_idx] = compute_disparities(call_ltp, put_ltp)
+                    single_check = True
+                else:
+                    # Update all strike data
+                    call_ltps, put_ltps = fetch_ltps(call_token_list, call_symbol_list, websocket), fetch_ltps(
+                        put_token_list, put_symbol_list, websocket)
+                    disparities = compute_disparities(call_ltps, put_ltps)
+                    single_check = False
+
+                min_disparity_idx = np.argmin(disparities)
+                min_disparity = disparities[min_disparity_idx]
+
+                if (currenttime() - last_print_time) > print_interval:
+                    print(f'Time: {currenttime().strftime("%H:%M:%S")}\n' +
+                          f'Index: {self.name}\n' +
+                          f'Current lowest disparity: {min_disparity:.2f}\n' +
+                          f'Strike: {strike_range[min_disparity_idx]}\n' +
+                          f'Single Strike: {single_check}\n')
+                    last_print_time = currenttime()
+
+                if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
+                    notifier('Equal strike tracker exited due to time limit.', self.webhook_url)
+                    raise Exception('Equal strike tracker exited due to time limit.')
+
+        idx = np.argmin(disparities)
+        strike_to_trade, call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp = (strike_range[idx],
+                                                                                              call_symbol_list[idx],
+                                                                                              call_token_list[idx],
+                                                                                              put_symbol_list[idx],
+                                                                                              put_token_list[idx],
+                                                                                              call_ltps[idx],
+                                                                                              put_ltps[idx])
+
+        if websocket:
+            call_and_put_token_list = list(call_token_list) + list(put_token_list)
+            tokens_to_unsubscribe = [token for token in call_and_put_token_list if token not in [call_token, put_token]]
+            sws.unsubscribe('websocket', 1, [{'exchangeType': 2, 'tokens': tokens_to_unsubscribe}])
+            for token in tokens_to_unsubscribe:
+                del price_dict[token]
+            print(f'{self.name}: Unsubscribed from tokens')
+
+        return strike_to_trade, call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp
+
+    def find_equal_strike_old(self, exit_time, websocket, wait_for_equality, target_disparity, expiry=None):
+
         """Finds the strike price that is equal to the current index price at the time of exit.
 
         Parameters:
@@ -1127,6 +1236,8 @@ class Index:
 
             last_print_time = currenttime()
             print_interval = timedelta(seconds=5)
+            per_share_charges = charges((call_avg_price + put_avg_price), self.lot_size, quantity_in_lots)
+            print(f'{self.name}: Charges per share {per_share_charges}')
             while in_trade and not error_faced:
                 if websocket:
                     underlying_price = price_dict.get(self.token, 0)['ltp']
@@ -1172,7 +1283,7 @@ class Index:
                           f'Profit Value: {profit_in_rs}\nIV: {iv}\n')
                     last_print_time = currenttime()
 
-                if take_profit and profit_in_pts > take_profit_points:
+                if take_profit and profit_in_pts > (take_profit_points + per_share_charges):
                     notifier(f'{self.name} smart exit triggered. Profit: {profit_in_pts}', self.webhook_url)
                     smart_exit = True
 

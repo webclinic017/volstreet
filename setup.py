@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 setup(
     name="autotrading",
-    version="0.3.0",
+    version="0.3.1",
     packages=find_packages(),
     install_requires=[
         "asttokens==2.2.1",
@@ -36,7 +36,7 @@ setup(
         "scipy==1.10.1",
         "six==1.16.0",
         "smartapi-python==1.3.0",
-        "spyder-kernels==2.4.2",
+        "spyder-kernels>=2.2.1",
         "stack-data==0.6.2",
         "tornado==6.2",
         "traitlets==5.8.1",
