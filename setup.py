@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 setup(
     name="autotrading",
-    version="0.3.1",
+    version="0.3.2",
     packages=find_packages(),
     install_requires=[
         "asttokens==2.2.1",
@@ -10,6 +10,7 @@ setup(
         "colorama==0.4.6",
         "comm==0.1.2",
         "decorator==5.1.1",
+        "discord.py>=2.2.2",
         "entrypoints==0.4",
         "executing==1.2.0",
         "idna==3.4",

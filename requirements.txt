@@ -9,3 +9,4 @@ pyotp~=2.8.0
 smartapi-python>=1.3.0
 lxml==4.9.2
 xlrd==2.0.1
+discord.py~=2.2.2
