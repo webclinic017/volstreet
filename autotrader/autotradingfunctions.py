@@ -78,120 +78,53 @@ def parse_symbol(symbol):
 
 
 def fetch_book(book):
+    def fetch_data(fetch_func, description, max_attempts=6, sleep_duration=2):
+        for attempt in range(1, max_attempts + 1):
+            try:
+                data = fetch_func()['data']
+                return data
+            except DataException:
+                if attempt == max_attempts:
+                    raise Exception(f'Failed to fetch {description}.')
+                else:
+                    sleep(sleep_duration)
+            except Exception as e:
+                if attempt == max_attempts:
+                    raise Exception(f'Failed to fetch {description}.')
+                else:
+                    print(f'Error {attempt} in fetching {description}: {e}')
+                    sleep(sleep_duration)
+
     if book == 'orderbook':
-        for attempt in range(1, 7):
-            try:
-                data = obj.orderBook()['data']
-                return data
-            except DataException:
-                if attempt == 6:
-                    raise Exception('Failed to fetch orderbook.')
-                else:
-                    sleep(2)
-                    continue
-            except Exception as e:
-                if attempt == 6:
-                    raise Exception('Failed to fetch orderbook.')
-                else:
-                    print(f'Error {attempt} in fetching orderbook: {e}')
-                    sleep(2)
-                    continue
-
-    elif book == 'positions' or book == 'position':
-        for attempt in range(1, 7):
-            try:
-                data = obj.position()['data']
-                return data
-            except DataException:
-                if attempt == 6:
-                    raise Exception('Failed to fetch positions.')
-                else:
-                    sleep(2)
-                    continue
-            except Exception as e:
-                if attempt == 6:
-                    raise Exception('Failed to fetch positions.')
-                else:
-                    print(f'Error {attempt} in fetching positions: {e}')
-                    sleep(2)
-                    continue
+        return fetch_data(obj.orderBook, 'orderbook')
+    elif book in {'positions', 'position'}:
+        return fetch_data(obj.position, 'positions')
+    else:
+        raise ValueError(f"Invalid book type '{book}'.")
 
 
-# Look up and return function for position and orderbook
-def lookup_and_return(book, fieldtolookup, valuetolookup, fieldtoreturn):
-    """Specify the dictionary as 'positions' or 'orderbook' or pass a dictionary. The valuetolookup can be
-    a list or a single value. If provided a list, the function will return a numpy array of values. If provided a
-    single value, the function will return a single value. Will return an empty array or 0 if the value is
-    not found."""
-
-    if isinstance(book, list):
-
-        if isinstance(valuetolookup, list):
-
-            bucket = [entry[fieldtoreturn] for entry in book
-                      if entry[fieldtolookup] in valuetolookup
-                      and entry[fieldtolookup] != '']
-
-        elif isinstance(valuetolookup, str):
-
-            bucket = [entry[fieldtoreturn] for entry in book
-                      if entry[fieldtolookup] == valuetolookup
-                      and entry[fieldtolookup] != '']
+def lookup_and_return(book, field_to_lookup, value_to_lookup, field_to_return):
+    def filter_and_return(data: list):
+        if isinstance(value_to_lookup, list):
+            bucket = [entry[field_to_return] for entry in data
+                      if entry[field_to_lookup] in value_to_lookup
+                      and entry[field_to_lookup] != '']
+            assert len(bucket) == len(value_to_lookup)
+            return np.array(bucket)
+        elif isinstance(value_to_lookup, str):
+            bucket = [entry[field_to_return] for entry in data
+                      if entry[field_to_lookup] == value_to_lookup
+                      and entry[field_to_lookup] != '']
+            return 0 if len(bucket) == 0 else (bucket[0] if len(bucket) == 1 else np.array(bucket))
         else:
             raise ValueError('Invalid valuetolookup')
 
-        # Logic for returning
-        if isinstance(valuetolookup, list):
-            assert len(bucket) == len(valuetolookup)
-            return np.array(bucket)
-        else:
-            if len(bucket) == 0:
-                return 0
-            elif len(bucket) == 1:
-                return bucket[0]
-            else:
-                return np.array(bucket)
-
-    elif isinstance(book, str):
-
-        for attempt in range(3):
-
-            if book == 'orderbook':
-                if isinstance(valuetolookup, list):
-
-                    bucket = [order[fieldtoreturn] for order in fetch_book('orderbook')
-                              if order[fieldtolookup] in valuetolookup and order[fieldtolookup] != '']
-                elif isinstance(valuetolookup, str):
-                    bucket = [order[fieldtoreturn] for order in fetch_book('orderbook')
-                              if order[fieldtolookup] == valuetolookup and order[fieldtolookup] != '']
-                else:
-                    raise ValueError('Invalid valuetolookup')
-
-            elif book == 'positions':
-
-                if isinstance(valuetolookup, list):
-                    bucket = [order[fieldtoreturn] for order in fetch_book('positions')
-                              if order[fieldtolookup] in valuetolookup and order[fieldtolookup] != '']
-                elif isinstance(valuetolookup, str):
-                    bucket = [order[fieldtoreturn] for order in fetch_book('positions')
-                              if order[fieldtolookup] == valuetolookup and order[fieldtolookup] != '']
-                else:
-                    raise ValueError('Invalid valuetolookup')
-            else:
-                raise ValueError('Invalid dictionary')
-
-            # Logic for returning
-            if isinstance(valuetolookup, list):
-                assert len(bucket) == len(valuetolookup)
-                return np.array(bucket)
-            else:
-                if len(bucket) == 0:
-                    return 0
-                elif len(bucket) == 1:
-                    return bucket[0]
-                else:
-                    return np.array(bucket)
-
+    if isinstance(book, list):
+        return filter_and_return(book)
+    elif isinstance(book, str) and book in {'orderbook', 'positions'}:
+        for _ in range(3):
+            book_data = fetch_book(book)
+            return filter_and_return(book_data)
     else:
         raise ValueError('Invalid dictionary')
 
@@ -231,18 +164,18 @@ def fetch_lot_size(name):
 def fetch_symbol_token(name):
     """Fetches symbol & token for a given scrip name. Provide just a single world if
     you want to fetch the symbol & token for the cash segment. If you want to fetch the
-    symbol & token for the options segment, provide name in the format '{name} {strike} {expiry} {optiontype}'.
+    symbol & token for the options segment, provide name in the format '{name} {strike} {expiry} {option_type}'.
     Expiry should be in the DDMMMYY format. Optiontype should be CE or PE."""
 
     if len(name.split()) == 1:
         if name in ['BANKNIFTY', 'NIFTY']:
-            symbol, token = scrips.loc[(scrips.name == name) & (scrips.exch_seg == 'NSE'), ['symbol', 'token']].values[
-                0]
+            symbol, token = scrips.loc[(scrips.name == name) &
+                                       (scrips.exch_seg == 'NSE'), ['symbol', 'token']].values[0]
         elif name == 'FINNIFTY':
-            futures = scrips.loc[(scrips.name == name) & (scrips.instrumenttype == 'FUTIDX'),
-            ['expiry', 'symbol', 'token']]
-            sorted_expiry_array = pd.to_datetime(futures.expiry, format='%d%b%Y').sort_values()
-            futures = futures.loc[sorted_expiry_array.index]
+            futures = scrips.loc[(scrips.name == name) &
+                                 (scrips.instrumenttype == 'FUTIDX'), ['expiry', 'symbol', 'token']]
+            futures["expiry"] = pd.to_datetime(futures["expiry"], format='%d%b%Y')
+            futures = futures.sort_values(by="expiry")
             symbol, token = futures.iloc[0][['symbol', 'token']].values
         else:
             symbol, token = scrips.loc[
@@ -251,8 +184,8 @@ def fetch_symbol_token(name):
                 (scrips.symbol.str.endswith('EQ')), ['symbol', 'token']
             ].values[0]
     elif len(name.split()) == 4:
-        name, strike, expiry, optiontype = name.split()
-        symbol = name + expiry + str(strike) + optiontype
+        name, strike, expiry, option_type = name.split()
+        symbol = name + expiry + str(strike) + option_type
         token = scrips[scrips.symbol == symbol]['token'].tolist()[0]
 
     else:
@@ -509,7 +442,7 @@ class MyWebSocketApp(SmartWebSocketV2):
 
     global obj, login_data
 
-    def __init__(self):
+    def __init__(self, webhook_url=None):
         auth_token = login_data['data']['jwtToken']
         feed_token = obj.getfeedToken()
         api_key = obj.api_key
@@ -519,6 +452,7 @@ class MyWebSocketApp(SmartWebSocketV2):
         self.data = {}
         self.updated_time = None
         self.iv_log = defaultdict(dict)
+        self.webhook_url = webhook_url
 
     def start_websocket(self):
 
@@ -649,6 +583,12 @@ class MyWebSocketApp(SmartWebSocketV2):
                     running_avg_put_iv = sum(put_ivs) / len(put_ivs) if put_ivs else None
                     running_avg_total_iv = sum(total_ivs) / len(total_ivs) if total_ivs else None
 
+                    if call_iv > 1.3 * running_avg_call_iv:
+                        notifier(f'Call IV for {index} {k} greater than average', self.webhook_url)
+
+                    if put_iv > 1.3 * running_avg_put_iv:
+                        notifier(f'Put IV for {index} {k} greater than average', self.webhook_url)
+
                     self.data[index][k] = {'call_price': call_price, 'put_price': put_price, 'call_iv': call_iv,
                                            'put_iv': put_iv, 'running_avg_call_iv': running_avg_call_iv,
                                            'running_avg_put_iv': running_avg_put_iv,
@@ -657,9 +597,9 @@ class MyWebSocketApp(SmartWebSocketV2):
         self.updated_time = min([datetime.strptime(info['timestamp'], '%H:%M:%S').time()
                                  for info in parsed_dict.values()])
 
-    def update_option_data(self, sleep_time=5, exit_time=(15, 30)):
+    def update_option_data(self, sleep_time=5, exit_time=(15, 30), **kwargs):
         while currenttime().time() < time(*exit_time):
-            self.option_snapshot()
+            self.option_snapshot(**kwargs)
             sleep(sleep_time)
 
 
@@ -881,10 +821,10 @@ class Index:
         if all(call_order_statuses == 'complete') and all(put_order_statuses == 'complete'):
             notifier(f'{order_prefix}Order(s) placed successfully for {buy_or_sell} {self.name} ' +
                      f'{strike_info} {expiry} {quantity_in_lots} lot(s).', self.webhook_url)
-            call_order_avg_price = lookup_and_return(orderbook, 'orderid',
-                                                     call_order_id_list, 'averageprice').astype(float).mean()
-            put_order_avg_price = lookup_and_return(orderbook, 'orderid',
-                                                    put_order_id_list, 'averageprice').astype(float).mean()
+            call_order_avg_price = lookup_and_return(orderbook, 'orderid', call_order_id_list,
+                                                     'averageprice').astype(float).mean()
+            put_order_avg_price = lookup_and_return(orderbook, 'orderid', put_order_id_list,
+                                                    'averageprice').astype(float).mean()
             if return_avg_price:
                 return call_order_avg_price, put_order_avg_price
             else:
@@ -1506,10 +1446,10 @@ class Index:
 
         if call_sl_hit and put_sl_hit:
             notifier(f'{self.name}: Both stoplosses were triggered.', self.webhook_url)
-            put_exit_price = lookup_and_return(orderbook, 'orderid',
-                                               put_stoploss_order_ids, 'averageprice').astype(float).mean()
-            call_exit_price = lookup_and_return(orderbook, 'orderid',
-                                                call_stoploss_order_ids, 'averageprice').astype(float).mean()
+            put_exit_price = lookup_and_return(orderbook, 'orderid', put_stoploss_order_ids,
+                                               'averageprice').astype(float).mean()
+            call_exit_price = lookup_and_return(orderbook, 'orderid', call_stoploss_order_ids,
+                                                'averageprice').astype(float).mean()
             points_captured = (put_avg_price - put_exit_price) + (call_avg_price - call_exit_price)
             stoploss_type = 'Both'
 
@@ -1519,8 +1459,8 @@ class Index:
                            'Exit order')
                 sleep(0.3)
             notifier(f'{self.name}: Exited put. Call stoploss was triggered.', self.webhook_url)
-            call_exit_price = lookup_and_return(orderbook, 'orderid',
-                                                call_stoploss_order_ids, 'averageprice').astype(float).mean()
+            call_exit_price = lookup_and_return(orderbook, 'orderid', call_stoploss_order_ids,
+                                                'averageprice').astype(float).mean()
             put_exit_price = put_price
             points_captured = (call_avg_price - call_exit_price) + (put_avg_price - put_exit_price)
             stoploss_type = 'Call'
@@ -1531,8 +1471,8 @@ class Index:
                            'Exit order')
                 sleep(0.3)
             notifier(f'{self.name}: Exited call. Put stoploss was triggered.', self.webhook_url)
-            put_exit_price = lookup_and_return(orderbook, 'orderid',
-                                               put_stoploss_order_ids, 'averageprice').astype(float).mean()
+            put_exit_price = lookup_and_return(orderbook, 'orderid', put_stoploss_order_ids,
+                                               'averageprice').astype(float).mean()
             call_exit_price = call_price
             points_captured = (put_avg_price - put_exit_price) + (call_avg_price - call_exit_price)
             stoploss_type = 'Put'
