@@ -13,7 +13,7 @@ from autotrader import scrips, holidays, blackscholes as bs
 from collections import defaultdict
 import yfinance as yf
 
-global login_data, obj, sws, price_dict
+global login_data, obj
 
 large_order_threshold = 10
 
@@ -67,52 +67,6 @@ def login(user, pin, apikey, authkey, webhook_url=None):
                 notifier('Login failed.', webhook_url)
                 raise Exception('Login failed.')
     notifier(f'Date: {currenttime().strftime("%d %b %Y %H:%M:%S")}\nLogged in successfully.', webhook_url)
-
-
-def start_websocket(exchangetype=1, tokens=None):
-    websocket_started = False
-
-    if tokens is None:
-        tokens = ['26000', '26009']
-
-    global sws, price_dict
-    price_dict = {}
-    auth_token = login_data['data']['jwtToken']
-    feed_token = obj.getfeedToken()
-    sws = SmartWebSocketV2(auth_token, obj.api_key, obj.userId, feed_token)
-
-    correlation_id = 'websocket'
-    mode = 1
-    token_list = [{'exchangeType': exchangetype, 'tokens': tokens}]
-
-    def on_data(wsapp, message):
-        price_dict[message['token']] = {'ltp': message['last_traded_price'] / 100,
-                                        'timestamp': datetime.fromtimestamp(
-                                            message['exchange_timestamp'] / 1000).strftime('%H:%M:%S')}
-
-    def on_open(wsapp):
-        nonlocal websocket_started
-        print("Starting Websocket")
-        sws.subscribe(correlation_id, mode, token_list)
-        websocket_started = True
-
-    def on_error(wsapp, error):
-        print(error)
-
-    def on_close(wsapp):
-        print("Close")
-
-    # Assign the callbacks.
-    sws.on_open = on_open
-    sws.on_data = on_data
-    sws.on_error = on_error
-    sws.on_close = on_close
-
-    Thread(target=sws.connect).start()
-
-    while not websocket_started:
-        print('Waiting for websocket to start')
-        sleep(1)
 
 
 def fetch_price_dict():
@@ -577,7 +531,7 @@ class SharedData:
 class Index:
     """Initialize an index with the name of the index in uppercase"""
 
-    def __init__(self, name, webhook_url=None, subscribe_to_ws=False):
+    def __init__(self, name, webhook_url=None, websocket=None):
 
         self.name = name
         self.ltp = None
@@ -608,13 +562,13 @@ class Index:
         else:
             raise ValueError('Index name not valid')
 
-        if subscribe_to_ws:
+        if websocket:
             try:
-                sws.subscribe('websocket', 1, [{'exchangeType': self.exchange_type, 'tokens': [self.token]}])
+                websocket.subscribe('websocket', 1, [{'exchangeType': self.exchange_type, 'tokens': [self.token]}])
                 sleep(2)
                 print(f'{self.name}: Subscribed underlying to the websocket')
-            except NameError:
-                print('Websocket not initialized. Please initialize the websocket before subscribing to it.')
+            except Exception as e:
+                print(f'{self.name}: Websocket subscription failed. {e}')
 
     def fetch_freeze_limit(self):
         try:
@@ -828,7 +782,7 @@ class Index:
     def find_equal_strike(self, exit_time, websocket, wait_for_equality, target_disparity, expiry=None):
 
         expiry = expiry or self.current_expiry
-        ltp = self.fetch_ltp() if not websocket else price_dict.get(self.token, 0)['ltp']
+        ltp = self.fetch_ltp() if not websocket else websocket.price_dict.get(self.token, 0)['ltp']
         current_strike = findstrike(ltp, self.base)
         strike_range = np.arange(current_strike - self.base * 2, current_strike + self.base * 2, self.base)
 
@@ -839,7 +793,7 @@ class Index:
 
         def fetch_ltps(tokens, symbols, socket):
             if socket:
-                return np.array([price_dict.get(token, {'ltp': 0})['ltp'] for token in tokens])
+                return np.array([websocket.price_dict.get(token, {'ltp': 0})['ltp'] for token in tokens])
             else:
                 return np.array([fetchltp('NFO', symbol, token) for symbol, token in zip(symbols, tokens)])
 
@@ -851,7 +805,8 @@ class Index:
         call_symbol_list, put_symbol_list = zip(*(symbols[0:3:2] for symbols in data))
 
         if websocket:
-            sws.subscribe('websocket', 1, [{'exchangeType': 2, 'tokens': list(call_token_list) + list(put_token_list)}])
+            websocket.subscribe('websocket', 1, [{'exchangeType': 2,
+                                                  'tokens': list(call_token_list) + list(put_token_list)}])
             sleep(3)
 
         call_ltps, put_ltps = fetch_ltps(call_token_list, call_symbol_list, websocket), fetch_ltps(put_token_list,
@@ -913,127 +868,6 @@ class Index:
             print(f'{self.name}: Unsubscribed from tokens')
 
         return strike_to_trade, call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp
-
-    def find_equal_strike_old(self, exit_time, websocket, wait_for_equality, target_disparity, expiry=None):
-
-        """Finds the strike price that is equal to the current index price at the time of exit.
-
-        Parameters:
-        exit_time (str): Cutoff time
-        websocket (bool): If True, the function will use websocket to find the strike price.
-        wait_for_equality (bool): If True, the function will wait for the prices to be equal.
-        kwargs (dict): Additional keyword arguments to be passed to the websocket function. Includes: 'target_disparity'.
-
-        Returns:
-        strike, call symbol, put symbol , call token, put token, call ltp, put ltp"""
-
-        if expiry is None:
-            expiry = self.current_expiry
-        else:
-            expiry = expiry
-
-        if websocket:
-
-            ltp = price_dict.get(self.token, 0)['ltp']
-            current_strike = findstrike(ltp, self.base)
-            strike_range = np.arange(current_strike - self.base * 2, current_strike + self.base * 2, self.base)
-
-            call_token_list = []
-            put_token_list = []
-            call_symbol_list = []
-            put_symbol_list = []
-            strike_list = []
-
-            for strike in strike_range:
-                call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {expiry} CE')
-                put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {expiry} PE')
-                call_token_list.append(call_token)
-                put_token_list.append(put_token)
-                call_symbol_list.append(call_symbol)
-                put_symbol_list.append(put_symbol)
-                strike_list.append(strike)
-
-            call_and_put_token_list = call_token_list + put_token_list
-            token_list_subscribe = [{'exchangeType': 2, 'tokens': call_and_put_token_list}]
-            sws.subscribe('websocket', 1, token_list_subscribe)
-            sleep(3)
-
-            # Fetching the last traded prices of different strikes from the global price_dict using token values
-            call_ltps = np.array([price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
-            put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
-            disparities = np.abs(call_ltps - put_ltps) / np.minimum(call_ltps, put_ltps) * 100
-
-            # If wait_for_equality is True, waits for call and put prices to be equal before selecting a strike
-            if wait_for_equality:
-
-                loop_number = 1
-                while np.min(disparities) > target_disparity:
-                    call_ltps = np.array(
-                        [price_dict.get(call_token, {'ltp': 0})['ltp'] for call_token in call_token_list])
-                    put_ltps = np.array([price_dict.get(put_token, {'ltp': 0})['ltp'] for put_token in put_token_list])
-                    disparities = np.abs(call_ltps - put_ltps) / np.minimum(call_ltps, put_ltps) * 100
-                    if loop_number % 200000 == 0:
-                        print(f'Time: {currenttime().strftime("%H:%M:%S")}\n' +
-                              f'Index: {self.name}\n' +
-                              f'Current lowest disparity: {np.min(disparities):.2f}\n' +
-                              f'Strike: {strike_list[np.argmin(disparities)]}\n')
-                    if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
-                        notifier('Equal strike tracker exited due to time limit.', self.webhook_url)
-                        raise Exception('Equal strike tracker exited due to time limit.')
-                    loop_number += 1
-
-            # Selecting the strike with the lowest disparity
-            strike_to_trade = strike_list[np.argmin(disparities)]
-            call_symbol = call_symbol_list[np.argmin(disparities)]
-            put_symbol = put_symbol_list[np.argmin(disparities)]
-            call_token = call_token_list[np.argmin(disparities)]
-            put_token = put_token_list[np.argmin(disparities)]
-            call_ltp = call_ltps[np.argmin(disparities)]
-            put_ltp = put_ltps[np.argmin(disparities)]
-
-            # Unsubscribing from the tokens
-            tokens_to_unsubscribe = [token for token in call_and_put_token_list if token not in [call_token, put_token]]
-            token_list_unsubscribe = [{'exchangeType': 2, 'tokens': tokens_to_unsubscribe}]
-            sws.unsubscribe('websocket', 1, token_list_unsubscribe)
-            for token in tokens_to_unsubscribe:
-                del price_dict[token]
-            print(f'{self.name}: Unsubscribed from tokens')
-            return strike_to_trade, call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp
-
-        else:
-
-            ltp = self.fetch_ltp()
-            current_strike = findstrike(ltp, self.base)
-            if self.name == 'FINNIFTY':
-                strike_range = np.arange(current_strike - self.base * 2, current_strike + self.base * 2, self.base)
-            else:
-                strike_range = np.arange(current_strike - self.base, current_strike + self.base * 2, self.base)
-            disparity_dict = {}
-
-            def update_disparity_dict(stk, mydict):
-                c_symbol, c_token = fetch_symbol_token(f'{self.name} {stk} {expiry} CE')
-                p_symbol, p_token = fetch_symbol_token(f'{self.name} {stk} {expiry} PE')
-                c_price = fetchltp('NFO', c_symbol, c_token)
-                p_price = fetchltp('NFO', p_symbol, p_token)
-                disparity = abs(c_price - p_price) / min(c_price, p_price) * 100
-                mydict[stk] = disparity, c_symbol, c_token, \
-                    p_symbol, p_token, c_price, p_price
-
-            for strike in strike_range:
-                update_disparity_dict(strike, disparity_dict)
-
-            if wait_for_equality:
-
-                while min(disparity_dict.values())[0] > target_disparity:
-                    for strike in strike_range:
-                        update_disparity_dict(strike, disparity_dict)
-                    if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
-                        notifier('Equal strike tracker exited due to time limit.', self.webhook_url)
-                        raise Exception('Equal strike tracker exited due to time limit.')
-
-            strike_to_trade = min(disparity_dict, key=disparity_dict.get)
-            call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp = disparity_dict[strike_to_trade][1:]
-            return strike_to_trade, call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp
 
     def rollover_overnight_short_straddle(self, quantity_in_lots, strike_offset=1, iv_threshold=0.8):
 
@@ -1142,7 +976,7 @@ class Index:
             self.place_combined_order(self.next_expiry, 'BUY', quantity_in_lots, strike=strike,
                                       order_tag='Weekly hedge')
 
-    def intraday_straddle(self, quantity_in_lots, exit_time=(15, 28), websocket=False, wait_for_equality=False,
+    def intraday_straddle(self, quantity_in_lots, exit_time=(15, 28), websocket=None, wait_for_equality=False,
                           move_sl=False, shared_data=None, stoploss='dynamic', target_disparity=10,
                           catch_trend=False, take_profit=False, trend_qty_ratio=0.5, trend_catcher_sl=0.003,
                           take_profit_points=np.inf):
@@ -1240,9 +1074,9 @@ class Index:
             print(f'{self.name}: Charges per share {per_share_charges}')
             while in_trade and not error_faced:
                 if websocket:
-                    underlying_price = price_dict.get(self.token, 0)['ltp']
-                    call_price = price_dict.get(call_token, 0)['ltp']
-                    put_price = price_dict.get(put_token, 0)['ltp']
+                    underlying_price = websocket.price_dict.get(self.token, 0)['ltp']
+                    call_price = websocket.price_dict.get(call_token, 0)['ltp']
+                    put_price = websocket.price_dict.get(put_token, 0)['ltp']
                 else:
                     underlying_price = self.fetch_ltp()
                     call_price = fetchltp('NFO', call_symbol, call_token)
@@ -1573,7 +1407,7 @@ class Index:
         if websocket:
             sws.close_connection()
 
-    def intraday_straddle_delta_hedged(self, quantity_in_lots, exit_time=(15, 30), websocket=False,
+    def intraday_straddle_delta_hedged(self, quantity_in_lots, exit_time=(15, 30), websocket=None,
                                        wait_for_equality=False, delta_threshold=1, **kwargs):
 
         # Finding equal strike
@@ -1605,8 +1439,8 @@ class Index:
 
             position_df = pd.DataFrame(positions).T
             if websocket:
-                underlying_price = price_dict.get(self.token, 0)['ltp']
-                position_df['ltp'] = position_df['token'].apply(lambda x: price_dict.get(x, 'None')['ltp'])
+                underlying_price = websocket.price_dict.get(self.token, 0)['ltp']
+                position_df['ltp'] = position_df['token'].apply(lambda x: websocket.price_dict.get(x, 'None')['ltp'])
             else:
                 underlying_price = self.fetch_ltp()
                 position_df['ltp'] = position_df.index.map(lambda x: fetchltp('NFO', *fetch_symbol_token(x)))
