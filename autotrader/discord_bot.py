@@ -29,7 +29,7 @@ async def exit_strats(ctx, *exit_indices):
         # Pass the bot.indices list to the find_index_by_name function
         e_index = find_index_by_name(index, bot.indices)
         if e_index is not None and e_index.traded:
-            e_index._intraday_straddle_forced_exit = True
+            e_index.intraday_straddle_forced_exit = True
             await ctx.send(f'Exiting {e_index.name}')
         else:
             await ctx.send(f'Index {index} not found or not traded.')
