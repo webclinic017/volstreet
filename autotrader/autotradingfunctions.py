@@ -739,7 +739,7 @@ class SharedData:
 class Index:
     """Initialize an index with the name of the index in uppercase"""
 
-    def __init__(self, name, webhook_url=None, websocket=None):
+    def __init__(self, name, webhook_url=None, websocket=None, spot_future_rate=0.06):
 
         self.name = name
         self.ltp = None
@@ -750,6 +750,7 @@ class Index:
         self.fut_expiry = None
         self.order_log = defaultdict(list)
         self.webhook_url = webhook_url
+        self.spot_future_rate = spot_future_rate
 
         self.symbol, self.token = fetch_symbol_token(name)
         self.lot_size = fetch_lot_size(name)
@@ -838,7 +839,7 @@ class Index:
         """Fetch LTP of the index. Uses futures for FINNIFTY"""
         if self.name == 'FINNIFTY':
             ltp = fetchltp('NFO', self.symbol, self.token)
-            self.ltp = spot_price_from_future(ltp, 0.06, timetoexpiry(self.fut_expiry))
+            self.ltp = spot_price_from_future(ltp, self.spot_future_rate, timetoexpiry(self.fut_expiry))
         else:
             self.ltp = fetchltp('NSE', self.symbol, self.token)
         return self.ltp
@@ -1838,3 +1839,16 @@ class Index:
             notifier('No delta positions to square off.', self.webhook_url)
         else:
             raise AssertionError('Delta positions are not balanced.')
+
+
+@log_errors
+def check_logger():
+    print('check_logger')
+
+    @log_errors
+    def inner():
+        print('inner')
+        print(90/0)
+    t = Thread(target=inner)
+    t.start()
+    print(8/0)
