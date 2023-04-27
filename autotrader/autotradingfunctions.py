@@ -13,10 +13,28 @@ from autotrader import scrips, holidays, blackscholes as bs
 from collections import defaultdict
 import yfinance as yf
 import re
+import logging
+import functools
 
 global login_data, obj
 
 large_order_threshold = 10
+
+today = datetime.now().strftime('%Y-%m-%d %H-%M')
+log_filename = f'errors-{today}.log'
+
+logging.basicConfig(filename=log_filename, level=logging.ERROR, format='%(asctime)s:%(levelname)s:%(message)s')
+
+
+def log_errors(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            logging.error(f"Error in function {func.__name__}: {e}")
+            raise
+    return wrapper
 
 
 def convert_to_serializable(data):
@@ -157,6 +175,50 @@ def currenttime():
     return datetime.now(ist).replace(tzinfo=None)
 
 
+def simulate_option_movement(spot, strike, time_to_expiry, flag, simulated_move=0.2, r=0.06, vol=None, price=None,
+                             print_results=False):
+    if price is None and vol is None:
+        raise ValueError('Either price or vol must be specified.')
+    flag = flag.lower()[0]
+    price_func = bs.put if flag.upper().startswith('P') else bs.call
+    simulated_move = simulated_move / 100
+    simulated_spot = (spot * (1 + simulated_move)) if flag == 'p' else (spot * (1 - simulated_move))
+    if vol is None:
+        try:
+            vol = bs.implied_volatility(price, spot, strike, time_to_expiry, r, flag)
+        except ValueError:
+            return None
+    if price is None:
+        price = price_func(spot, strike, time_to_expiry, r, vol)
+    current_delta = bs.delta(spot, strike, time_to_expiry, r, vol, flag)
+    new_delta = bs.delta(simulated_spot, strike, time_to_expiry, r, vol, flag)
+    delta_change = new_delta - current_delta
+    average_delta = abs((new_delta + current_delta) / 2)
+    new_price = price_func(simulated_spot, strike, time_to_expiry, r, vol)
+    price_gain = price - new_price
+
+    if print_results:
+        print(f'Current Delta: {current_delta:.2f}\nNew Delta: {new_delta:.2f}\n'
+              f'Delta Change: {delta_change:.2f}\nAverage Delta: {average_delta:.2f}\n'
+              f'New Price: {new_price:.2f}\nPrice Change: {price_gain:.2f}\n'
+              f'Volatility: {vol:.2f}\nSimulated Spot: {simulated_spot:.2f}\n'
+              f'Simulated Move: {simulated_move * 100:.2f}%\n')
+
+    return [price_gain, average_delta]
+
+
+def spot_price_from_future(future_price, interest_rate, time_to_future):
+    """
+    Calculate the spot price from the future price, interest rate, and time.
+
+    :param future_price: float, the future price of the asset
+    :param interest_rate: float, the annual interest rate (as a decimal, e.g., 0.05 for 5%)
+    :param time_to_future: float, the time to maturity (in years)
+    :return: float, the spot price of the asset
+    """
+    spot_price = future_price / ((1 + interest_rate) ** time_to_future)
+    return spot_price
+
 def fetch_lot_size(name):
     return int(scrips.loc[(scrips.symbol.str.startswith(name)) & (scrips.exch_seg == 'NFO'), 'lotsize'].iloc[0])
 
@@ -283,13 +345,25 @@ def timetoexpiry(expiry, effective_time=False, in_days=False):
     return time_to_expiry * multiplier
 
 
-def straddleiv(callprice, putprice, spot, strike, timeleft, return_both=False):
+def calculate_iv(opt_price, spot, strike, tte, opt_type):
+    try:
+        return bs.implied_volatility(opt_price, spot, strike, tte, 0.06,
+                                     opt_type)
+    except ValueError:
+        return None
 
-    call_iv = bs.implied_volatility(callprice, spot, strike, timeleft, 0.05, 'c')
-    put_iv = bs.implied_volatility(putprice, spot, strike, timeleft, 0.05, 'p')
-    avg_iv = (call_iv + put_iv) / 2 * 100
 
-    return round(avg_iv, 2) if not return_both else (round(call_iv * 100, 2), round(put_iv * 100, 2))
+def straddle_iv(callprice, putprice, spot, strike, timeleft):
+
+    call_iv = calculate_iv(callprice, spot, strike, timeleft, 'CE')
+    put_iv = calculate_iv(putprice, spot, strike, timeleft, 'PE')
+
+    if call_iv is not None and put_iv is not None:
+        avg_iv = (call_iv + put_iv) / 2
+    else:
+        avg_iv = call_iv if put_iv is not None else call_iv
+
+    return call_iv, put_iv, avg_iv
 
 
 def calc_greeks(position_string, position_price, underlying_price):
@@ -681,6 +755,7 @@ class Index:
         elif self.name == 'FINNIFTY':
             self.base = 50
             self.exchange_type = 2
+
         else:
             raise ValueError('Index name not valid')
 
@@ -750,7 +825,8 @@ class Index:
     def fetch_ltp(self):
         """Fetch LTP of the index. Uses futures for FINNIFTY"""
         if self.name == 'FINNIFTY':
-            self.ltp = fetchltp('NFO', self.symbol, self.token)
+            ltp = fetchltp('NFO', self.symbol, self.token)
+            self.ltp = spot_price_from_future(ltp, 0.06, timetoexpiry(self.fut_expiry))
         else:
             self.ltp = fetchltp('NSE', self.symbol, self.token)
         return self.ltp
@@ -983,6 +1059,7 @@ class Index:
 
         return strike_to_trade, call_symbol, call_token, put_symbol, put_token, call_ltp, put_ltp
 
+    @log_errors
     def rollover_overnight_short_straddle(self, quantity_in_lots, strike_offset=1, iv_threshold=0.8):
 
         """ Rollover overnight short straddle to the next expiry.
@@ -1021,7 +1098,7 @@ class Index:
             ltp = self.fetch_ltp()
             sell_strike = findstrike(ltp * strike_offset, self.base)
             call_ltp, put_ltp = fetch_straddle_price(self.name, self.current_expiry, sell_strike)
-            iv = straddleiv(call_ltp, put_ltp, ltp, sell_strike, timetoexpiry(self.current_expiry))
+            call_iv, put_iv, iv = straddle_iv(call_ltp, put_ltp, ltp, sell_strike, timetoexpiry(self.current_expiry))
             if iv < vix * iv_threshold:
                 notifier(f'IV is too low compared to VIX: IV {iv}, Vix {vix}.', self.webhook_url)
                 return
@@ -1090,10 +1167,12 @@ class Index:
             self.place_combined_order(self.next_expiry, 'BUY', quantity_in_lots, strike=strike,
                                       order_tag='Weekly hedge')
 
+    @log_errors
     def intraday_straddle(self, quantity_in_lots, exit_time=(15, 28), websocket=None, wait_for_equality=False,
                           move_sl=False, shared_data=None, stoploss='dynamic', target_disparity=10,
-                          catch_trend=False, trend_qty_ratio=0.5, trend_catcher_sl=0.003, take_profit=False,
-                          take_profit_points=np.inf, take_profit_order=False):
+                          catch_trend=False, trend_qty_ratio=0.5, trend_catcher_sl=0.003, safeguard_movement=0.003,
+                          safeguard_iv_spike=1.3, smart_exit=False, take_profit=False, take_profit_points=np.inf,
+                          take_profit_order=False):
 
         """ Params:
                 quantity_in_lots: int
@@ -1112,7 +1191,7 @@ class Index:
         """
 
         order_tag = 'Intraday straddle'
-        expiry = self.current_expiry
+        expiry = self.next_expiry
         sleep_interval = 3 if shared_data is None and not take_profit else 0
 
         # Splicing orders
@@ -1178,25 +1257,32 @@ class Index:
         summary_message = '\n'.join(f'{k}: {v}' for k, v in self.order_log[order_tag][0].items())
 
         # Recording initial iv information
-        try:
-            traded_call_iv, traded_put_iv = straddleiv(call_avg_price, put_avg_price, entry_spot,
-                                                       equal_strike, timetoexpiry(expiry), return_both=True)
-            traded_avg_iv = (traded_call_iv + traded_put_iv) / 2
-        except ValueError:
-            trader_call_iv, traded_put_iv = None, None
-            traded_avg_iv = None
+
+        traded_call_iv, traded_put_iv, traded_avg_iv = straddle_iv(call_avg_price, put_avg_price, entry_spot,
+                                                                   equal_strike, timetoexpiry(expiry))
+
         summary_message += f'\nTraded IV: {traded_avg_iv}'
         notifier(summary_message, self.webhook_url)
         sleep(1)
 
+        @log_errors
         def price_tracker():
 
-            nonlocal call_price, put_price, underlying_price, call_avg_price, put_avg_price, sl_hit_dict, take_profit_exit
-            nonlocal call_exit_price, put_exit_price, mtm_price, profit_in_pts
+            nonlocal call_price, put_price, underlying_price, call_avg_price, put_avg_price, sl_hit_dict
+            nonlocal take_profit_exit, call_exit_price, put_exit_price, mtm_price, profit_in_pts
+            nonlocal call_iv, put_iv, avg_iv
 
             # Print settings
             last_print_time = currenttime()
             print_interval = timedelta(seconds=5)
+            days_to_expiry = timetoexpiry(expiry, in_days=True)
+
+            # Smart exit settings
+            smart_exit_trg = False
+            smart_exit_delta_threshold = 0.06 if days_to_expiry < 1 else 0.12
+            smart_exit_notification_sent = False
+            incremental_gains = 100
+            average_delta = 1
 
             while in_trade and not error_faced:
                 # Update prices
@@ -1228,18 +1314,36 @@ class Index:
                              f'Profit: {profit_in_pts}\n', self.webhook_url)
                     take_profit_exit = True
 
-                try:
-                    call_iv, put_iv = straddleiv(call_price, put_price, underlying_price,
-                                                 equal_strike, timetoexpiry(expiry), return_both=True)
-                    avg_iv = (call_iv + put_iv) / 2
-                except ValueError:
-                    avg_iv = 'Could not calculate IV'
+                call_iv, put_iv, avg_iv = straddle_iv(call_price, put_price,
+                                                      underlying_price, equal_strike, timetoexpiry(expiry))
+
+                if (callsl or putsl) and (call_iv or put_iv):
+                    option_type = 'p' if callsl else 'c'
+                    option_price = put_price if callsl else call_price
+                    tracked_iv = put_iv if callsl and put_iv is not None else avg_iv
+                    if tracked_iv is not None:
+                        incremental_gains, average_delta = simulate_option_movement(underlying_price, equal_strike,
+                                                                                    timetoexpiry(expiry), option_type,
+                                                                                    simulated_move=0.2, r=0.06,
+                                                                                    vol=tracked_iv, price=option_price)
+                    else:
+                        incremental_gains, average_delta = 100, 1
+
+                    if smart_exit and average_delta < smart_exit_delta_threshold:
+                        if not smart_exit_notification_sent:
+                            notifier(f'{self.name} smart exit triggered\n'
+                                     f'Time: {currenttime().time()}\n'
+                                     f'Average delta: {average_delta}\n', self.webhook_url)
+                            smart_exit_notification_sent = True
+                            smart_exit_trg = True
 
                 stoploss_message = ''
                 if callsl:
-                    stoploss_message += f'Call Exit Price: {mtm_ce_price}\n'
+                    stoploss_message += f'Call Exit Price: {mtm_ce_price}\nIncr. Gains: {incremental_gains}\n' + \
+                                        f'Avg. Delta: {average_delta}\n'
                 if putsl:
-                    stoploss_message += f'Put Exit Price: {mtm_pe_price}\n'
+                    stoploss_message += f'Put Exit Price: {mtm_pe_price}\nIncr. Gains: {incremental_gains}\n' + \
+                                        f'Avg. Delta: {average_delta}\n'
 
                 if currenttime() - last_print_time > print_interval:
                     print(f'Index: {self.name}\nTime: {currenttime().time()}\nStrike: {equal_strike}\n' +
@@ -1248,14 +1352,14 @@ class Index:
                           stoploss_message +
                           f'Total price: {call_price + put_price:0.2f}\nMTM Price: {mtm_price:0.2f}\n' +
                           f'Profit in points: {profit_in_pts:0.2f}\n' +
-                          f'Profit Value: {profit_in_rs:0.2f}\nIV: {avg_iv:0.2f}\n')
+                          f'Profit Value: {profit_in_rs:0.2f}\nIV: {avg_iv}\nSmart Exit: {smart_exit_trg}\n')
                     last_print_time = currenttime()
 
         def process_order_statuses(order_book, order_ids, stop_loss=False, notify_url=None, context=''):
 
             nonlocal orderbook
 
-            pending_text = "trigger pending" if stop_loss else "pending"
+            pending_text = "trigger pending" if stop_loss else "open"
             context = f'{context} ' if context else ''
 
             statuses = lookup_and_return(order_book, 'orderid', order_ids, 'status')
@@ -1315,9 +1419,10 @@ class Index:
         def check_sl_orders(order_ids, side: str, data=shared_data, refresh=False):
 
             """ This function checks if the stop loss orders have been triggered or not. It also updates the order book
-            if needed."""
+            in the nonlocal scope. This function is responsible for setting the exit prices."""
 
-            nonlocal orderbook, call_exit_price, put_exit_price, call_price, put_price
+            nonlocal orderbook, call_exit_price, put_exit_price, call_price, put_price, underlying_price
+            nonlocal traded_call_iv, traded_put_iv, traded_avg_iv, call_iv, put_iv, avg_iv, entry_spot
 
             orderbook = fetch_orderbook_if_needed(data, refresh)
             triggered, complete = process_order_statuses(
@@ -1326,6 +1431,23 @@ class Index:
 
             if not triggered and not complete:
                 return False, False
+
+            # Checking if there has been an unjustified trigger of stoploss without much movement in the underlying
+            # We will also use IV to check if the stoploss was justified or not
+            if triggered:
+                movement_from_entry = abs((underlying_price/entry_spot)-1)
+                present_iv = call_iv if side == 'call' else put_iv
+                original_iv = traded_call_iv if side == 'call' else traded_put_iv
+                iv_spike = present_iv/original_iv
+                if movement_from_entry < safeguard_movement and iv_spike > safeguard_iv_spike:
+                    notifier(f'{self.name} {side.capitalize()} stoploss triggered without much '
+                             f'movement in the underlying or because of IV spike.\n'
+                             f'Movement: {movement_from_entry*100:0.2f}. IV spike: {iv_spike}', self.webhook_url)
+                else:
+                    notifier(f'{self.name} {side.capitalize()} stoploss triggered. '
+                             f'Movement: {movement_from_entry*100:0.2f}. '
+                             f'IV spike: {iv_spike}',
+                             self.webhook_url)
 
             if complete:
                 exit_price = (
@@ -1346,6 +1468,7 @@ class Index:
         def check_exit_conditions(time_now, time_of_exit, *bools):
             return time_now >= time_of_exit or any(bools)
 
+        @log_errors
         def trend_catcher(sl_type, qty_ratio, trend_sl):
 
             nonlocal underlying_price, take_profit_exit, in_trade
@@ -1388,6 +1511,7 @@ class Index:
             for qty in trend_spliced_orders:
                 placeorder(symbol, token, qty * self.lot_size, 'BUY', 'MARKET')
 
+        @log_errors
         def take_profit_when_sl_hit(sl_type, sl_dict):
 
             nonlocal orderbook
@@ -1405,6 +1529,7 @@ class Index:
                 target_profit_order_ids.append(order_id)
             notifier(f'{self.name} {other_side} target profit orders placed at {target_price}', self.webhook_url)
 
+            sleep(1)
             orderbook = fetch_book("orderbook")
             while not check_exit_conditions(currenttime().time(), time(*exit_time), sl_dict[other_side],
                                             self.intraday_straddle_forced_exit):
@@ -1415,11 +1540,14 @@ class Index:
                 if take_profit_exit_triggered:
                     notifier(f'{self.name} {other_side} target profit order triggered.', self.webhook_url)
                     break
-                if take_profit_exit and not take_profit_exit_triggered:
-                    notifier(f'{self.name} {other_side} target profit orders should have triggered\n'
-                             f'Cancelling tp orders', self.webhook_url)
-                    cancel_pending_orders(target_profit_order_ids, 'NOMRAL')
+                if take_profit_exit:
+                    notifier(f'{self.name} {other_side} target profit orders should have triggered', self.webhook_url)
                     break
+
+            # Once out of the loop
+            if not take_profit_exit_triggered:
+                notifier(f'{self.name} {other_side} cancelling target profit orders', self.webhook_url)
+                cancel_pending_orders(target_profit_order_ids, 'NORMAL')
 
         def process_sl_hit(sl_type, sl_dict, sl_orders_complete, symbol, token, other_symbol,
                            other_token, other_stoploss_order_ids, other_avg_price):
@@ -1454,7 +1582,7 @@ class Index:
                                                'BUY', other_avg_price, f'Stoploss {other_sl_type}')
                     other_stoploss_order_ids.append(sl_order_id)
 
-            notifier(f'{self.name} {sl_type} stoploss triggered and completed.', self.webhook_url)
+            # notifier(f'{self.name} {sl_type} stoploss triggered and completed.', self.webhook_url)
 
             refresh = True
             while not check_exit_conditions(currenttime().time(), time(*exit_time), sl_dict[other_sl_type],
@@ -1507,6 +1635,10 @@ class Index:
         put_exit_price = 0
         mtm_price = 0
         profit_in_pts = 0
+
+        call_iv = 0
+        put_iv = 0
+        avg_iv = 0
 
         # Basic price information being set in outer scope as well
         total_avg_price = call_avg_price + put_avg_price
