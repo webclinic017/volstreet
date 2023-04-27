@@ -1330,7 +1330,7 @@ class Index:
                 call_iv, put_iv, avg_iv = straddle_iv(call_price, put_price,
                                                       underlying_price, equal_strike, timetoexpiry(expiry))
 
-                if (callsl or putsl) and (call_iv or put_iv):
+                if smart_exit and (callsl or putsl) and (call_iv or put_iv) and not smart_exit_notification_sent:
                     option_type = 'p' if callsl else 'c'
                     option_price = put_price if callsl else call_price
                     tracked_iv = put_iv if callsl and put_iv is not None else avg_iv
@@ -1342,7 +1342,7 @@ class Index:
                     else:
                         incremental_gains, average_delta = 100, 1
 
-                    if smart_exit and average_delta < smart_exit_delta_threshold:
+                    if average_delta < smart_exit_delta_threshold:
                         if not smart_exit_notification_sent:
                             notifier(f'{self.name} smart exit triggered\n'
                                      f'Time: {currenttime().time()}\n'
