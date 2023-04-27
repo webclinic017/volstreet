@@ -619,7 +619,7 @@ class MyWebSocketApp(SmartWebSocketV2):
             # Iterating over the indices
             for index in indices:
 
-                instrument = parsed_dict[index]
+                instrument_info = parsed_dict[index]
                 self.option_watchlist[index] = {}
                 expiry = [parse_symbol(symbol)[1] for symbol in parsed_dict.keys()
                           if symbol.startswith(index) and 'CE' in symbol][0]
@@ -632,7 +632,7 @@ class MyWebSocketApp(SmartWebSocketV2):
                         put_symbol = symbol.replace('CE', 'PE')
                         put_option = parsed_dict[put_symbol]
 
-                        s = instrument['ltp']
+                        s = instrument_info['ltp']
                         k = float(parse_symbol(symbol)[2])
                         t = time_to_expiry
                         r = interest_rate
@@ -678,15 +678,27 @@ class MyWebSocketApp(SmartWebSocketV2):
                         running_avg_put_iv = sum(put_ivs) / len(put_ivs) if put_ivs else None
                         running_avg_total_iv = sum(total_ivs) / len(total_ivs) if total_ivs else None
 
-                        if call_iv and call_iv > iv_threshold * running_avg_call_iv \
-                                and self.iv_log[index][k]['last_notified_time'] < currenttime() - timedelta(minutes=5):
-                            notifier(f'Call IV for {index} {k} greater than average', self.webhook_url)
-                            self.iv_log[index][k]['last_notified_time'] = currenttime()
+                        def check_and_notify(iv, running_avg_iv, iv_type, idx, idx_price, K, iv_hurdle, iv_log,
+                                             webhook_url):
+                            not_in_the_money_by_100 = False
 
-                        if put_iv and put_iv > iv_threshold * running_avg_put_iv \
-                                and self.iv_log[index][k]['last_notified_time'] < currenttime() - timedelta(minutes=5):
-                            notifier(f'Put IV for {index} {k} greater than average', self.webhook_url)
-                            self.iv_log[index][k]['last_notified_time'] = currenttime()
+                            if iv_type == 'Call':
+                                not_in_the_money_by_100 = idx_price <= K - 100
+                            elif iv_type == 'Put':
+                                not_in_the_money_by_100 = idx_price >= K + 100
+
+                            if (iv and iv > iv_hurdle * running_avg_iv and
+                                    iv_log[idx][K]['last_notified_time'] < currenttime() - timedelta(minutes=5) and
+                                    not_in_the_money_by_100):
+                                notifier(f'{iv_type} IV for {idx} {K} greater than average.\nIV: {iv}\n'
+                                         f'Running Average: {running_avg_iv}', webhook_url)
+                                iv_log[idx][K]['last_notified_time'] = currenttime()
+
+                        # Inside your main function or method
+                        check_and_notify(call_iv, running_avg_call_iv, 'Call', index, s, k, iv_threshold, self.iv_log,
+                                         self.webhook_url)
+                        check_and_notify(put_iv, running_avg_put_iv, 'Put', index, s, k, iv_threshold, self.iv_log,
+                                         self.webhook_url)
 
                         self.option_watchlist[index][k] = {'call_price': call_price, 'put_price': put_price,
                                                            'call_iv': call_iv, 'put_iv': put_iv,
@@ -1171,8 +1183,8 @@ class Index:
     def intraday_straddle(self, quantity_in_lots, exit_time=(15, 28), websocket=None, wait_for_equality=False,
                           move_sl=False, shared_data=None, stoploss='dynamic', target_disparity=10,
                           catch_trend=False, trend_qty_ratio=0.5, trend_catcher_sl=0.003, safeguard_movement=0.003,
-                          safeguard_iv_spike=1.3, smart_exit=False, take_profit=False, take_profit_points=np.inf,
-                          take_profit_order=False):
+                          safeguard_iv_spike=1.3, safeguard_price_diff=20, smart_exit=False, take_profit=False,
+                          take_profit_points=np.inf, take_profit_order=False):
 
         """ Params:
                 quantity_in_lots: int
@@ -1191,7 +1203,7 @@ class Index:
         """
 
         order_tag = 'Intraday straddle'
-        expiry = self.next_expiry
+        expiry = self.current_expiry
         sleep_interval = 3 if shared_data is None and not take_profit else 0
 
         # Splicing orders
@@ -1435,11 +1447,17 @@ class Index:
             # Checking if there has been an unjustified trigger of stoploss without much movement in the underlying
             # We will also use IV to check if the stoploss was justified or not
             if triggered:
+
                 movement_from_entry = abs((underlying_price/entry_spot)-1)
                 present_iv = call_iv if side == 'call' else put_iv
+                present_price = call_price if side == "call" else put_price
                 original_iv = traded_call_iv if side == 'call' else traded_put_iv
+                price_function = bs.call if side == 'call' else bs.put
                 iv_spike = present_iv/original_iv
-                if movement_from_entry < safeguard_movement and iv_spike > safeguard_iv_spike:
+                ideal_price = price_function(underlying_price, equal_strike, timetoexpiry(expiry), 0.06, original_iv)
+
+                if (movement_from_entry < safeguard_movement and iv_spike > safeguard_iv_spike and
+                        present_price-ideal_price < safeguard_price_diff):
                     notifier(f'{self.name} {side.capitalize()} stoploss triggered without much '
                              f'movement in the underlying or because of IV spike.\n'
                              f'Movement: {movement_from_entry*100:0.2f}. IV spike: {iv_spike}', self.webhook_url)
