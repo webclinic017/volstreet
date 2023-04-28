@@ -20,10 +20,24 @@ global login_data, obj
 
 large_order_threshold = 10
 
-today = datetime.now().strftime('%Y-%m-%d %H-%M')
-log_filename = f'errors-{today}.log'
 
-logging.basicConfig(filename=log_filename, level=logging.ERROR, format='%(asctime)s:%(levelname)s:%(message)s')
+def create_logger(name, level, log_file_prefix):
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    today = datetime.now().strftime('%Y-%m-%d')
+    log_filename = f'{log_file_prefix}-{today}.log'
+    handler = logging.FileHandler(log_filename)
+    formatter = logging.Formatter("%(asctime)s:%(levelname)s:%(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    return logger
+
+
+# Create and configure the error logger
+logger1 = create_logger("logger1", logging.ERROR, "errors")
+
+# Create and configure the second logger
+logger2 = create_logger("logger2", logging.INFO, "info")
 
 
 def log_errors(func):
@@ -32,7 +46,7 @@ def log_errors(func):
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            logging.error(f"Error in function {func.__name__}: {e}")
+            logger1.error(f"Error in function {func.__name__}: {e}")
             raise
     return wrapper
 
@@ -1183,9 +1197,9 @@ class Index:
     @log_errors
     def intraday_straddle(self, quantity_in_lots, exit_time=(15, 28), websocket=None, wait_for_equality=False,
                           move_sl=False, shared_data=None, stoploss='dynamic', target_disparity=10,
-                          catch_trend=False, trend_qty_ratio=0.5, trend_catcher_sl=0.003, safeguard_movement=0.003,
-                          safeguard_iv_spike=1.3, safeguard_price_diff=20, smart_exit=False, take_profit=False,
-                          take_profit_points=np.inf, take_profit_order=False):
+                          catch_trend=False, trend_qty_ratio=0.5, trend_catcher_sl=0.003, safeguard=False,
+                          safeguard_movement=0.0035, safeguard_spike=1.2, smart_exit=False,
+                          take_profit=False, take_profit_points=np.inf, take_profit_order=False):
 
         """ Params:
                 quantity_in_lots: int
@@ -1194,13 +1208,18 @@ class Index:
                 wait_for_equality: bool
                 move_sl: bool
                 shared_data: class object
-                stoploss: str|float
+                stoploss: str
                 target_disparity: float
                 catch_trend: bool
-                take_profit: bool
                 trend_qty_ratio: float
                 trend_catcher_sl: float
+                safeguard: bool
+                safeguard_movement: float
+                safeguard_spike: float
+                smart_exit: bool
+                take_profit: bool
                 take_profit_points: float
+                take_profit_order: bool
         """
 
         order_tag = 'Intraday straddle'
@@ -1447,26 +1466,33 @@ class Index:
 
             # Checking if there has been an unjustified trigger of stoploss without much movement in the underlying
             # We will also use IV to check if the stoploss was justified or not
-            if triggered:
+            if triggered and safeguard:
 
                 movement_from_entry = abs((underlying_price/entry_spot)-1)
-                present_iv = call_iv if side == 'call' else put_iv
+                present_iv = call_iv if side == 'call' and call_iv is not None else avg_iv
                 present_price = call_price if side == "call" else put_price
-                original_iv = traded_call_iv if side == 'call' else traded_put_iv
-                price_function = bs.call if side == 'call' else bs.put
-                iv_spike = present_iv/original_iv
-                ideal_price = price_function(underlying_price, equal_strike, timetoexpiry(expiry), 0.06, original_iv)
+                original_iv = traded_call_iv if side == 'call' and traded_call_iv is not None else traded_avg_iv
 
-                if (movement_from_entry < safeguard_movement and iv_spike > safeguard_iv_spike and
-                        present_price-ideal_price < safeguard_price_diff):
-                    notifier(f'{self.name} {side.capitalize()} stoploss triggered without much '
-                             f'movement in the underlying or because of IV spike.\n'
-                             f'Movement: {movement_from_entry*100:0.2f}. IV spike: {iv_spike}', self.webhook_url)
-                else:
+                if present_iv is None or original_iv is None:
                     notifier(f'{self.name} {side.capitalize()} stoploss triggered. '
-                             f'Movement: {movement_from_entry*100:0.2f}. '
-                             f'IV spike: {iv_spike}',
+                             f'Unable to calculate IV spike due to missing IV data.',
                              self.webhook_url)
+                else:
+                    price_function = bs.call if side == 'call' else bs.put
+                    iv_spike = present_iv / original_iv
+                    ideal_price = price_function(underlying_price, equal_strike, timetoexpiry(expiry), 0.06, original_iv)
+                    price_spike = present_price / ideal_price
+
+                    if (movement_from_entry < safeguard_movement and
+                            (iv_spike > safeguard_spike or price_spike > safeguard_spike)):
+                        notifier(f'{self.name} {side.capitalize()} stoploss triggered without much '
+                                 f'movement in the underlying or because of IV spike.\n'
+                                 f'Movement: {movement_from_entry * 100:0.2f}. IV spike: {iv_spike}', self.webhook_url)
+                    else:
+                        notifier(f'{self.name} {side.capitalize()} stoploss triggered. '
+                                 f'Movement: {movement_from_entry * 100:0.2f}. '
+                                 f'IV spike: {iv_spike}',
+                                 self.webhook_url)
 
             if complete:
                 exit_price = (
