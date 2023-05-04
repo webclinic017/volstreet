@@ -562,7 +562,7 @@ class PriceFeed(SmartWebSocketV2):
         super().__init__(auth_token, api_key, client_code, feed_token)
         self.price_dict = {}
         self.option_watchlist = {}
-        self.updated_time = None
+        self.last_update_time = None
         self.iv_log = defaultdict(dict)
         self.webhook_url = webhook_url
 
@@ -580,6 +580,7 @@ class PriceFeed(SmartWebSocketV2):
             self.price_dict[message['token']] = {'ltp': message['last_traded_price'] / 100,
                                                  'timestamp': datetime.fromtimestamp(
                                                      message['exchange_timestamp'] / 1000).strftime('%H:%M:%S')}
+            self.last_update_time = currenttime()
 
         def on_open(wsapp):
             nonlocal websocket_started
@@ -728,9 +729,6 @@ class PriceFeed(SmartWebSocketV2):
                                                            'running_avg_put_iv': running_avg_put_iv,
                                                            'running_avg_total_iv': running_avg_total_iv}
 
-            self.updated_time = max([datetime.strptime(info['timestamp'], '%H:%M:%S').time()
-                                     for info in parsed_dict.values()])
-
             sleep(sleep_time)
 
 
@@ -767,6 +765,10 @@ class Option:
         self.expiry = expiry
         self.symbol, self.token = fetch_symbol_token(f'{self.underlying} {self.strike} '
                                                      f'{self.expiry} {self.option_type}')
+
+    def __repr__(self):
+        return f'{self.__class__.__name__}(strike={self.strike}, option_type={self.option_type}, ' \
+                  f'underlying={self.underlying}, expiry={self.expiry})'
 
     def __hash__(self):
         return hash((self.strike, self.option_type, self.underlying, self.expiry))
@@ -826,23 +828,27 @@ class Strangle:
         self.put_strike = self.put_option.strike
         self.underlying = underlying
         self.expiry = expiry
+        self.call_symbol, self.call_token = self.call_option.fetch_symbol_token()
+        self.put_symbol, self.put_token = self.put_option.fetch_symbol_token()
 
     def __repr__(self):
         return f'{self.__class__.__name__}(callstrike={self.call_option.strike}, putstrike={self.put_option.strike}, '\
                f'underlying={self.underlying}, expiry={self.expiry})'
 
     def __hash__(self):
-        return hash((self.call_option, self.put_option))
+        return hash((self.call_strike, self.put_strike, self.underlying, self.expiry))
 
     def fetch_ltp(self):
-        return self.call_option.fetch_ltp(), self.put_option.fetch_ltp()
+        return fetchltp('NFO', self.call_symbol, self.call_token), \
+                  fetchltp('NFO', self.put_symbol, self.put_token)
 
     def fetch_total_ltp(self):
-        call_ltp, put_ltp = self.fetch_ltp()
+        call_ltp, put_ltp = fetchltp('NFO', self.call_symbol, self.call_token), \
+                            fetchltp('NFO', self.put_symbol, self.put_token)
         return call_ltp + put_ltp
 
     def fetch_symbol_token(self):
-        return self.call_option.fetch_symbol_token(), self.put_option.fetch_symbol_token()
+        return self.call_symbol, self.call_token, self.put_symbol, self.put_token
 
 
 class Straddle(Strangle):
@@ -1281,16 +1287,16 @@ class Index:
         trade_data[self.name] = sell_strike
         save_data(trade_data)
 
-    def buy_weekly_hedge(self, quantity_in_lots, type_of_hedge='strangle', **kwargs):
+    def buy_weekly_hedge(self, quantity_in_lots, type_of_hedge='strangle', strike_offset=1, call_offset=1, put_offset=1):
 
         ltp = self.fetch_ltp()
         if type_of_hedge == 'strangle':
-            call_strike = findstrike(ltp * kwargs['call_offset'], self.base)
-            put_strike = findstrike(ltp * kwargs['put_offset'], self.base)
+            call_strike = findstrike(ltp * call_offset, self.base)
+            put_strike = findstrike(ltp * put_offset, self.base)
             self.place_combined_order(self.next_expiry, 'BUY', quantity_in_lots, call_strike=call_strike,
                                       put_strike=put_strike, order_tag='Weekly hedge')
         elif type_of_hedge == 'straddle':
-            strike = findstrike(ltp * kwargs['strike_offset'], self.base)
+            strike = findstrike(ltp * strike_offset, self.base)
             self.place_combined_order(self.next_expiry, 'BUY', quantity_in_lots, strike=strike,
                                       order_tag='Weekly hedge')
 
