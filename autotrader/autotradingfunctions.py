@@ -1293,12 +1293,20 @@ class Index:
         if type_of_hedge == 'strangle':
             call_strike = findstrike(ltp * call_offset, self.base)
             put_strike = findstrike(ltp * put_offset, self.base)
-            self.place_combined_order(self.next_expiry, 'BUY', quantity_in_lots, call_strike=call_strike,
-                                      put_strike=put_strike, order_tag='Weekly hedge')
+            strike = None
         elif type_of_hedge == 'straddle':
             strike = findstrike(ltp * strike_offset, self.base)
-            self.place_combined_order(self.next_expiry, 'BUY', quantity_in_lots, strike=strike,
-                                      order_tag='Weekly hedge')
+            call_strike = None
+            put_strike = None
+        else:
+            raise Exception('Invalid type of hedge.')
+
+        call_buy_avg, put_buy_avg = self.place_combined_order(self.next_expiry, 'BUY', quantity_in_lots, strike=strike,
+                                                              call_strike=call_strike, put_strike=put_strike,
+                                                              order_tag='Weekly Hedge', return_avg_price=True)
+
+        self.log_order(strike if strike is not None else call_strike, self.next_expiry, 'BUY', call_buy_avg,
+                       put_buy_avg, 'Weekly Hedge')
 
     @log_errors
     def intraday_straddle(self, quantity_in_lots, exit_time=(15, 28), websocket=None, wait_for_equality=False,
