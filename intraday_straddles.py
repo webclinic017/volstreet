@@ -4,23 +4,44 @@ from datetime import time
 from autotrader.discord_bot import run_bot
 
 # User inputs
-discord_webhook_url = None
-discord_bot_token = ''
-user = ''
-pin = ''
-apikey = ''
-authkey = ''
+client = ''
+try:
+    discord_webhook_url = __import__('os').environ[f'{client}_WEBHOOK_URL']
+except KeyError:
+    discord_webhook_url = None
+
+user = __import__('os').environ[f'{client}_USER']
+pin = __import__('os').environ[f'{client}_PIN']
+apikey = __import__('os').environ[f'{client}_API_KEY']
+authkey = __import__('os').environ[f'{client}_AUTHKEY']
+
+try:
+    discord_bot_token = __import__('os').environ[f'{client}_DISCORD_BOT_TOKEN']
+except KeyError:
+    discord_bot_token = None
+
+# Setting the shared data
+shared_data = atf.SharedData()
+update_data_thread = threading.Thread(target=shared_data.update_data)
 
 # Trade inputs
-quantity_in_lots = 5
-exit_time = (15, 26, 00)
-move_sl = False
-stoploss = 'dynamic'
-wait_for_equality = False
-target_disparity = 2
-catch_trend = False
-take_profit = False
-take_profit_points = 3
+parameters = dict(
+    quantity_in_lots=1,
+    exit_time=(15, 28),
+    websocket=None,
+    shared_data=shared_data,
+    wait_for_equality=False,
+    target_disparity=10,
+    move_sl=False,
+    stoploss='dynamic',
+    catch_trend=True,
+    trend_qty_ratio=0.5,
+    trend_catcher_sl=0.0033,
+    smart_exit=True,
+    safeguard=True,
+    safeguard_movement=0.003,
+    safeguard_spike=1.2,
+)
 
 # If today is a holiday, the script will exit
 if atf.currenttime().date() in atf.holidays:
@@ -28,20 +49,21 @@ if atf.currenttime().date() in atf.holidays:
     exit()
 
 atf.login(user=user, pin=pin, apikey=apikey, authkey=authkey, webhook_url=discord_webhook_url)
+nifty = atf.Index('NIFTY', webhook_url=discord_webhook_url)
+bnf = atf.Index('BANKNIFTY', webhook_url=discord_webhook_url)
+fin = atf.Index('FINNIFTY', webhook_url=discord_webhook_url, spot_future_rate=0.01)
 
-indices = [atf.Index(index_name, webhook_url=discord_webhook_url) for index_name in ['FINNIFTY', 'NIFTY', 'BANKNIFTY']]
-shared_data = atf.SharedData()
-update_data_thread = threading.Thread(target=shared_data.update_data)
+indices = [fin, bnf, nifty]
 
-less_than_3_days = atf.timetoexpiry(indices[0].current_expiry, effective_time=True, in_days=True) < 3
-main_expiry = atf.timetoexpiry(indices[1].current_expiry, effective_time=True, in_days=True) < 1
+less_than_3_days = atf.timetoexpiry(fin.current_expiry, effective_time=True, in_days=True) < 3
+main_expiry = atf.timetoexpiry(nifty.current_expiry, effective_time=True, in_days=True) < 1
 
 straddle_threads = []
 for index in indices:
     if index.name == 'FINNIFTY':
         if not main_expiry and less_than_3_days:
             # If FINNIFTY is allowed to trade, update the quantity
-            quantity_in_lots = quantity_in_lots * 2
+            parameters['quantity_in_lots'] = parameters['quantity_in_lots'] * 2
         else:
             atf.notifier(f'Skipping {index.name} straddle.', discord_webhook_url)
             index.traded = False
@@ -54,23 +76,15 @@ for index in indices:
             continue
 
     thread = threading.Thread(target=index.intraday_straddle,
-                              kwargs={'quantity_in_lots': quantity_in_lots,
-                                      'wait_for_equality': wait_for_equality,
-                                      'move_sl': move_sl,
-                                      'exit_time': exit_time,
-                                      'shared_data': shared_data,
-                                      'catch_trend': catch_trend,
-                                      'stoploss': stoploss,
-                                      'target_disparity': target_disparity,
-                                      'take_profit': take_profit,
-                                      'take_profit_points': take_profit_points})
+                              kwargs=parameters)
     straddle_threads.append(thread)
     index.traded = True
 
 # Start the discord bot
-discord_bot_thread = threading.Thread(target=run_bot, args=(discord_bot_token, indices))
-discord_bot_thread.daemon = True
-discord_bot_thread.start()
+if discord_bot_token:
+    discord_bot_thread = threading.Thread(target=run_bot, args=(discord_bot_token, indices))
+    discord_bot_thread.daemon = True
+    discord_bot_thread.start()
 
 # Wait for the market to open
 while atf.currenttime().time() < time(9, 16):
