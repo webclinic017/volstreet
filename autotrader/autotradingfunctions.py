@@ -591,10 +591,9 @@ class PriceFeed(SmartWebSocketV2):
         self.on_data = self.on_data_handler
         self.on_error = lambda wsapp, error: print(error)
         self.on_close = lambda wsapp: print("Close")
-
+        websocket_started = False
         Thread(target=self.connect).start()
 
-        websocket_started = False
         while not websocket_started:
             print('Waiting for websocket to start')
             sleep(1)
@@ -629,27 +628,32 @@ class PriceFeed(SmartWebSocketV2):
         for index in indices:
 
             if expiries is None:
-                expiries = [index.current_expiry]
+                expiries_list = [index.current_expiry, index.next_expiry, index.month_expiry]
+            else:
+                expiries_list = expiries
 
             ltp = index.fetch_ltp()
 
             # Creating a OptionChains object for each index
-            self.symbol_option_chains = {index.name: OptionChains()}
+            self.symbol_option_chains[index.name] = OptionChains()
             current_strike = findstrike(ltp, index.base)
             strike_range = np.arange(current_strike - (index.base * (range_of_strikes / 2)),
                                      current_strike + (index.base * (range_of_strikes / 2)), index.base)
             strike_range = map(int, strike_range)
             data = []
-            for strike, expiry in itertools.product(strike_range, expiries):
+            call_token_list, put_token_list = [], []
+            for strike, expiry in list(itertools.product(strike_range, expiries_list)):
                 try:
                     call_token, put_token = get_option_tokens(strike, expiry)
                     data.append((call_token, put_token))
+                    call_token_list, put_token_list = zip(*data)
                     # Appending the expiry-strike pair to the container in OptionChains object
                     self.symbol_option_chains[index.name].exp_strike_pairs.append((expiry, strike))
                 except Exception as e:
                     logger1.error(f'Error in fetching tokens for {strike, expiry} for {index.name}: {e}')
                     print(f'Error in fetching tokens for {strike, expiry} for {index.name}: {e}')
-            call_token_list, put_token_list = zip(*data)
+                    call_token_list, put_token_list = ['abc'], ['abc']
+                    continue
             self.subscribe(self.correlation_id, 1, [{'exchangeType': 2,
                                              'tokens': list(call_token_list) + list(put_token_list)}])
             self.index_option_chains_subscribed.append(index.name)
@@ -665,12 +669,12 @@ class PriceFeed(SmartWebSocketV2):
             for index in indices:
                 expiries_subscribed = set([*zip(*self.symbol_option_chains[index].exp_strike_pairs)][0])
                 for expiry in expiries_subscribed:
-                    self.process_index_expiry(index, expiry, parsed_dict, calculate_iv,
-                                              process_iv_log, n_values, iv_threshold)
+                    self.build_option_chain(index, expiry, parsed_dict, calculate_iv, process_iv_log, n_values,
+                                            iv_threshold)
 
             sleep(sleep_time)
 
-    def process_index_expiry(self, index: str, expiry: str, parsed_dict: dict, calculate_iv, process_iv_log,
+    def build_option_chain(self, index: str, expiry: str, parsed_dict: dict, calculate_iv, process_iv_log,
                              n_values, iv_threshold):
 
         instrument_info = parsed_dict[index]
@@ -708,13 +712,13 @@ class PriceFeed(SmartWebSocketV2):
                 'times': [], 'count': 0, 'last_notified_time': currenttime()
             }
 
-            self.iv_log[index][expiry][strike]['call_ivs'].append(call_iv)
-            self.iv_log[index][expiry][strike]['put_ivs'].append(put_iv)
-            self.iv_log[index][expiry][strike]['total_ivs'].append(avg_iv)
-            self.iv_log[index][expiry][strike]['times'].append(currenttime().time())
-            self.iv_log[index][expiry][strike]['count'] += 1
+        self.iv_log[index][expiry][strike]['call_ivs'].append(call_iv)
+        self.iv_log[index][expiry][strike]['put_ivs'].append(put_iv)
+        self.iv_log[index][expiry][strike]['total_ivs'].append(avg_iv)
+        self.iv_log[index][expiry][strike]['times'].append(currenttime().time())
+        self.iv_log[index][expiry][strike]['count'] += 1
 
-        call_ivs, put_ivs, total_ivs = self.get_recent_ivs(index, strike, expiry, n_values)
+        call_ivs, put_ivs, total_ivs = self.get_recent_ivs(index, expiry, strike, n_values)
 
         running_avg_call_iv = sum(call_ivs) / len(call_ivs) if call_ivs else None
         running_avg_put_iv = sum(put_ivs) / len(put_ivs) if put_ivs else None
@@ -1202,8 +1206,8 @@ class Index:
         call_symbol_list, put_symbol_list = zip(*(symbols[0:3:2] for symbols in data))
 
         if websocket:
-            websocket.subscribe('websocket', 1, [{'exchangeType': 2,
-                                                  'tokens': list(call_token_list) + list(put_token_list)}])
+            websocket.subscribe(websocket.correlation_id, 1, [{'exchangeType': 2,
+                                                               'tokens': list(call_token_list) + list(put_token_list)}])
             sleep(3)
 
         call_ltps, put_ltps = fetch_ltps(call_token_list, call_symbol_list, websocket), fetch_ltps(put_token_list,
