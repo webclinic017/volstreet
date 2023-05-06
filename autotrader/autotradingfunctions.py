@@ -15,6 +15,7 @@ import yfinance as yf
 import re
 import logging
 import functools
+import itertools
 
 global login_data, obj
 
@@ -118,12 +119,12 @@ def fetch_book(book):
                 return data
             except DataException:
                 if attempt == max_attempts:
-                    raise Exception(f'Failed to fetch {description}.')
+                    raise Exception(f'Failed to fetch {description} due to DataException.')
                 else:
                     sleep(sleep_duration)
             except Exception as e:
                 if attempt == max_attempts:
-                    raise Exception(f'Failed to fetch {description}.')
+                    raise Exception(f'Failed to fetch {description}: {e}')
                 else:
                     print(f'Error {attempt} in fetching {description}: {e}')
                     sleep(sleep_duration)
@@ -290,13 +291,13 @@ def fetchltp(exchange_seg, symbol, token):
             return price
         except DataException:
             if attempt == 5:
-                raise DataException('Failed to fetch LTP')
+                raise DataException('Failed to fetch LTP due to DataException')
             else:
                 sleep(1)
                 continue
         except Exception as e:
             if attempt == 5:
-                raise e
+                raise Exception(f'Error in fetching LTP: {e}')
             else:
                 print(f'Error {attempt} in fetching LTP: {e}')
                 sleep(1)
@@ -551,185 +552,206 @@ def cancel_pending_orders(order_ids, variety="STOPLOSS"):
         obj.cancelOrder(order_ids, variety)
 
 
-class PriceFeed(SmartWebSocketV2):
-    global obj, login_data
+class OptionChains(defaultdict):
+    """An object for having option chains for multiple expiries.
+    Each expiry is a dictionary with integer default values"""
+    def __init__(self):
+        super().__init__(lambda: defaultdict(lambda: defaultdict(int)))
+        self.underlying_price = None
+        self.exp_strike_pairs = []
 
-    def __init__(self, webhook_url=None):
+
+class PriceFeed(SmartWebSocketV2):
+
+    def __init__(self, obj, login_data, webhook_url=None, correlation_id='default'):
         auth_token = login_data['data']['jwtToken']
         feed_token = obj.getfeedToken()
         api_key = obj.api_key
         client_code = obj.userId
         super().__init__(auth_token, api_key, client_code, feed_token)
         self.price_dict = {}
-        self.option_watchlist = {}
+        self.symbol_option_chains = {}
         self.last_update_time = None
-        self.iv_log = defaultdict(dict)
+        self.iv_log = defaultdict(lambda: defaultdict(dict))
         self.webhook_url = webhook_url
+        self.index_option_chains_subscribed = []
+        self.correlation_id = correlation_id
+        self.finnifty_index = Index('FINNIFTY', spot_future_rate=0.01)
 
     def start_websocket(self):
-
-        websocket_started = False
-
-        tokens = ['26000', '26009']
-
-        correlation_id = 'websocket'
-        mode = 1
-        token_list = [{'exchangeType': 1, 'tokens': tokens}]
-
-        def on_data(wsapp, message):
-            self.price_dict[message['token']] = {'ltp': message['last_traded_price'] / 100,
-                                                 'timestamp': datetime.fromtimestamp(
-                                                     message['exchange_timestamp'] / 1000).strftime('%H:%M:%S')}
-            self.last_update_time = currenttime()
 
         def on_open(wsapp):
             nonlocal websocket_started
             print("Starting Websocket")
-            self.subscribe(correlation_id, mode, token_list)
+            self.subscribe_tokens()
             websocket_started = True
-
-        def on_error(wsapp, error):
-            print(error)
-
-        def on_close(wsapp):
-            print("Close")
 
         # Assign the callbacks.
         self.on_open = on_open
-        self.on_data = on_data
-        self.on_error = on_error
-        self.on_close = on_close
+        self.on_data = self.on_data_handler
+        self.on_error = lambda wsapp, error: print(error)
+        self.on_close = lambda wsapp: print("Close")
 
         Thread(target=self.connect).start()
 
+        websocket_started = False
         while not websocket_started:
             print('Waiting for websocket to start')
             sleep(1)
 
+    def subscribe_tokens(self):
+        tokens = ['26000', '26009']
+        mode = 1
+        token_list = [{'exchangeType': 1, 'tokens': tokens}]
+        self.subscribe(self.correlation_id, mode, token_list)
+
+    def on_data_handler(self, wsapp, message):
+        self.price_dict[message['token']] = {
+            'ltp': message['last_traded_price'] / 100,
+            'timestamp': datetime.fromtimestamp(
+                message['exchange_timestamp'] / 1000).strftime('%H:%M:%S')
+        }
+        self.last_update_time = currenttime()
+
     def parse_price_dict(self):
         new_price_dict = {scrips.loc[scrips.token == token]['symbol'].values[0]: value for token, value in
                           self.price_dict.items()}
+        new_price_dict.update({'FINNIFTY': {'ltp': self.finnifty_index.fetch_ltp()}})
         return new_price_dict
 
-    def add_options(self, *indices, range_of_strikes=10):
+    def add_index_options(self, *indices, range_of_strikes=10, expiries=None):
+
+        def get_option_tokens(strike, expiry):
+            _, c_token = fetch_symbol_token(f'{index.name} {strike} {expiry} CE')
+            _, p_token = fetch_symbol_token(f'{index.name} {strike} {expiry} PE')
+            return c_token, p_token
 
         for index in indices:
-            def help_func(strike):
-                _, c_token = fetch_symbol_token(f'{index.name} {strike} {index.current_expiry} CE')
-                _, p_token = fetch_symbol_token(f'{index.name} {strike} {index.current_expiry} PE')
-                return c_token, p_token
+
+            if expiries is None:
+                expiries = [index.current_expiry]
 
             ltp = index.fetch_ltp()
+
+            # Creating a OptionChains object for each index
+            self.symbol_option_chains = {index.name: OptionChains()}
             current_strike = findstrike(ltp, index.base)
             strike_range = np.arange(current_strike - (index.base * (range_of_strikes / 2)),
                                      current_strike + (index.base * (range_of_strikes / 2)), index.base)
             strike_range = map(int, strike_range)
-            data = [help_func(strike) for strike in strike_range]
+            data = []
+            for strike, expiry in itertools.product(strike_range, expiries):
+                try:
+                    call_token, put_token = get_option_tokens(strike, expiry)
+                    data.append((call_token, put_token))
+                    # Appending the expiry-strike pair to the container in OptionChains object
+                    self.symbol_option_chains[index.name].exp_strike_pairs.append((expiry, strike))
+                except Exception as e:
+                    logger1.error(f'Error in fetching tokens for {strike, expiry} for {index.name}: {e}')
+                    print(f'Error in fetching tokens for {strike, expiry} for {index.name}: {e}')
             call_token_list, put_token_list = zip(*data)
-            self.subscribe('websocket', 1, [{'exchangeType': 2,
+            self.subscribe(self.correlation_id, 1, [{'exchangeType': 2,
                                              'tokens': list(call_token_list) + list(put_token_list)}])
+            self.index_option_chains_subscribed.append(index.name)
         sleep(3)
 
-    def option_screener(self, n_values=36, iv_threshold=1.3, sleep_time=5, exit_time=(15, 30)):
+    def update_option_chain(self, sleep_time=5, exit_time=(15, 30), calculate_iv=True, process_iv_log=True,
+                            n_values=100, iv_threshold=1.1):
 
         while currenttime().time() < time(*exit_time):
 
             parsed_dict = self.parse_price_dict()
-
-            indices = ['NIFTY', 'BANKNIFTY']
-            interest_rate = 0.065  # Replace this with the actual interest rate
-
-            # Iterating over the indices
+            indices = self.index_option_chains_subscribed
             for index in indices:
-
-                instrument_info = parsed_dict[index]
-                self.option_watchlist[index] = {}
-                expiry = [parse_symbol(symbol)[1] for symbol in parsed_dict.keys()
-                          if symbol.startswith(index) and 'CE' in symbol][0]
-                time_to_expiry = timetoexpiry(expiry)
-
-                # Iterating over the strikes and calculating the IV
-                for symbol, info in parsed_dict.items():
-
-                    if symbol.startswith(index) and 'CE' in symbol:
-                        put_symbol = symbol.replace('CE', 'PE')
-                        put_option = parsed_dict[put_symbol]
-
-                        s = instrument_info['ltp']
-                        k = float(parse_symbol(symbol)[2])
-                        t = time_to_expiry
-                        r = interest_rate
-
-                        call_price = info['ltp']
-                        put_price = put_option['ltp']
-
-                        try:
-                            call_iv = bs.implied_volatility(call_price, s, k, t, r, 'C')
-                        except ValueError:
-                            call_iv = None
-                        try:
-                            put_iv = bs.implied_volatility(put_price, s, k, t, r, 'P')
-                        except ValueError:
-                            put_iv = None
-
-                        # Update the IV log
-                        if call_iv is not None or put_iv is not None:
-                            if k not in self.iv_log[index]:
-                                self.iv_log[index][k] = {'call_ivs': [], 'put_ivs': [], 'total_ivs': [],
-                                                         'times': [], 'count': 0, 'last_notified_time': currenttime()}
-                            if call_iv is not None:
-                                self.iv_log[index][k]['call_ivs'].append(call_iv)
-                            if put_iv is not None:
-                                self.iv_log[index][k]['put_ivs'].append(put_iv)
-                            if call_iv is not None and put_iv is not None:
-                                self.iv_log[index][k]['total_ivs'].append((call_iv + put_iv) / 2)
-
-                            self.iv_log[index][k]['times'].append(datetime.strptime(info['timestamp'],
-                                                                                    '%H:%M:%S').time())
-                            self.iv_log[index][k]['count'] += 1
-
-                        # Calculate the running average
-
-                        call_ivs = self.iv_log[index][k]['call_ivs'][-n_values:] if k in self.iv_log[
-                            index] else []
-                        put_ivs = self.iv_log[index][k]['put_ivs'][-n_values:] if k in self.iv_log[
-                            index] else []
-                        total_ivs = self.iv_log[index][k]['total_ivs'][-n_values:] if k in self.iv_log[
-                            index] else []
-
-                        running_avg_call_iv = sum(call_ivs) / len(call_ivs) if call_ivs else None
-                        running_avg_put_iv = sum(put_ivs) / len(put_ivs) if put_ivs else None
-                        running_avg_total_iv = sum(total_ivs) / len(total_ivs) if total_ivs else None
-
-                        def check_and_notify(iv, running_avg_iv, iv_type, idx, idx_price, K, iv_hurdle, iv_log,
-                                             webhook_url):
-                            not_in_the_money_by_100 = False
-
-                            if iv_type == 'Call':
-                                not_in_the_money_by_100 = idx_price <= K - 100
-                            elif iv_type == 'Put':
-                                not_in_the_money_by_100 = idx_price >= K + 100
-
-                            if (iv and iv > iv_hurdle * running_avg_iv and
-                                    iv_log[idx][K]['last_notified_time'] < currenttime() - timedelta(minutes=5) and
-                                    not_in_the_money_by_100):
-                                notifier(f'{iv_type} IV for {idx} {K} greater than average.\nIV: {iv}\n'
-                                         f'Running Average: {running_avg_iv}', webhook_url)
-                                iv_log[idx][K]['last_notified_time'] = currenttime()
-
-                        # Inside your main function or method
-                        check_and_notify(call_iv, running_avg_call_iv, 'Call', index, s, k, iv_threshold, self.iv_log,
-                                         self.webhook_url)
-                        check_and_notify(put_iv, running_avg_put_iv, 'Put', index, s, k, iv_threshold, self.iv_log,
-                                         self.webhook_url)
-
-                        self.option_watchlist[index][k] = {'call_price': call_price, 'put_price': put_price,
-                                                           'call_iv': call_iv, 'put_iv': put_iv,
-                                                           'running_avg_call_iv': running_avg_call_iv,
-                                                           'running_avg_put_iv': running_avg_put_iv,
-                                                           'running_avg_total_iv': running_avg_total_iv}
+                expiries_subscribed = set([*zip(*self.symbol_option_chains[index].exp_strike_pairs)][0])
+                for expiry in expiries_subscribed:
+                    self.process_index_expiry(index, expiry, parsed_dict, calculate_iv,
+                                              process_iv_log, n_values, iv_threshold)
 
             sleep(sleep_time)
+
+    def process_index_expiry(self, index: str, expiry: str, parsed_dict: dict, calculate_iv, process_iv_log,
+                             n_values, iv_threshold):
+
+        instrument_info = parsed_dict[index]
+        spot = instrument_info['ltp']
+
+        for symbol, info in parsed_dict.items():
+
+            if symbol.startswith(index) and 'CE' in symbol and expiry in symbol:
+                strike = float(parse_symbol(symbol)[2])
+                put_symbol = symbol.replace('CE', 'PE')
+                put_option = parsed_dict[put_symbol]
+                call_price = info['ltp']
+                put_price = put_option['ltp']
+
+                self.symbol_option_chains[index][expiry][strike]['call_price'] = call_price
+                self.symbol_option_chains[index][expiry][strike]['put_price'] = put_price
+                self.symbol_option_chains[index].underlying_price = spot
+
+                if calculate_iv:
+                    time_to_expiry = timetoexpiry(expiry)
+                    call_iv, put_iv, avg_iv = straddle_iv(call_price, put_price, spot, strike, time_to_expiry)
+                    self.symbol_option_chains[index][expiry][strike]['call_iv'] = call_iv
+                    self.symbol_option_chains[index][expiry][strike]['put_iv'] = put_iv
+                    self.symbol_option_chains[index][expiry][strike]['avg_iv'] = avg_iv
+
+                    if process_iv_log:
+                        self.process_iv_log(index, spot, strike, expiry, call_iv, put_iv, avg_iv,
+                                            n_values, iv_threshold)
+
+    def process_iv_log(self, index, spot, strike, expiry, call_iv, put_iv, avg_iv, n_values, iv_threshold):
+
+        if strike not in self.iv_log[index][expiry]:
+            self.iv_log[index][expiry][strike] = {
+                'call_ivs': [], 'put_ivs': [], 'total_ivs': [],
+                'times': [], 'count': 0, 'last_notified_time': currenttime()
+            }
+
+            self.iv_log[index][expiry][strike]['call_ivs'].append(call_iv)
+            self.iv_log[index][expiry][strike]['put_ivs'].append(put_iv)
+            self.iv_log[index][expiry][strike]['total_ivs'].append(avg_iv)
+            self.iv_log[index][expiry][strike]['times'].append(currenttime().time())
+            self.iv_log[index][expiry][strike]['count'] += 1
+
+        call_ivs, put_ivs, total_ivs = self.get_recent_ivs(index, strike, expiry, n_values)
+
+        running_avg_call_iv = sum(call_ivs) / len(call_ivs) if call_ivs else None
+        running_avg_put_iv = sum(put_ivs) / len(put_ivs) if put_ivs else None
+        running_avg_total_iv = sum(total_ivs) / len(total_ivs) if total_ivs else None
+
+        self.check_and_notify(call_iv, running_avg_call_iv, 'Call', index, spot, strike, expiry, iv_threshold)
+        self.check_and_notify(put_iv, running_avg_put_iv, 'Put', index, spot, strike, expiry, iv_threshold)
+
+        self.symbol_option_chains[index][expiry][strike].update({
+            'running_avg_call_iv': running_avg_call_iv,
+            'running_avg_put_iv': running_avg_put_iv,
+            'running_avg_total_iv': running_avg_total_iv
+        })
+
+    def get_recent_ivs(self, index, expiry, strike, n_values):
+        call_ivs = self.iv_log[index][expiry][strike]['call_ivs'][-n_values:]
+        put_ivs = self.iv_log[index][expiry][strike]['put_ivs'][-n_values:]
+        total_ivs = self.iv_log[index][expiry][strike]['total_ivs'][-n_values:]
+        call_ivs = [*filter(lambda x: x is not None, call_ivs)]
+        put_ivs = [*filter(lambda x: x is not None, put_ivs)]
+        total_ivs = [*filter(lambda x: x is not None, total_ivs)]
+        return call_ivs, put_ivs, total_ivs
+
+    def check_and_notify(self, iv, running_avg_iv, iv_type, idx, idx_price, K, exp, iv_hurdle):
+        not_in_the_money_by_100 = False
+
+        if iv_type == 'Call':
+            not_in_the_money_by_100 = idx_price <= K - 100
+        elif iv_type == 'Put':
+            not_in_the_money_by_100 = idx_price >= K + 100
+
+        if (iv and iv > iv_hurdle * running_avg_iv and
+                self.iv_log[idx][exp][K]['last_notified_time'] < currenttime() - timedelta(minutes=5) and
+                not_in_the_money_by_100):
+            notifier(f'{iv_type} IV for {idx} {K} greater than average.\nIV: {iv}\n'
+                     f'Running Average: {running_avg_iv}', self.webhook_url)
+            self.iv_log[idx][exp][K]['last_notified_time'] = currenttime()
 
 
 class SharedData:
@@ -856,6 +878,49 @@ class Straddle(Strangle):
         super().__init__(strike, strike, underlying, expiry)
 
 
+class SyntheticArbSystem:
+
+    def __init__(self, symbol_option_chains):
+        self.symbol_option_chains = symbol_option_chains
+        self.index_expiry_pairs = {}
+
+    def get_single_index_single_expiry_prices(self, index, expiry):
+
+        option_chain = self.symbol_option_chains[index][expiry]
+        strikes = [strike for strike in option_chain]
+        call_prices = [option_chain[strike]['call_price'] for strike in strikes]
+        put_prices = [option_chain[strike]['put_price'] for strike in strikes]
+
+        return np.array(strikes), np.array(call_prices), np.array(put_prices)
+
+    def find_arbitrage_opportunities(self, index, expiry, exit_time=(15, 28), threshold=3):
+        
+        strikes, call_prices, put_prices = self.get_single_index_single_expiry_prices(index, expiry)
+        synthetic_prices = strikes + call_prices - put_prices
+        min_price_index = np.argmin(synthetic_prices)
+        max_price_index = np.argmax(synthetic_prices)
+        min_price = synthetic_prices[min_price_index]
+        max_price = synthetic_prices[max_price_index]
+
+        while currenttime().time() < time(*exit_time):
+
+            if max_price - min_price > threshold:
+                return {
+                    'buy_strike': strikes[min_price_index],
+                    'sell_strike': strikes[max_price_index],
+                    'price_difference': max_price - min_price
+                }
+
+            for i, strike in enumerate(strikes):
+                call_prices[i] = self.symbol_option_chains[index][expiry][strike]['call_price']
+                put_prices[i] = self.symbol_option_chains[index][expiry][strike]['put_price']
+            synthetic_prices = strikes + call_prices + put_prices
+            min_price_index = np.argmin(synthetic_prices)
+            max_price_index = np.argmax(synthetic_prices)
+            min_price = synthetic_prices[min_price_index]
+            max_price = synthetic_prices[max_price_index]
+
+
 class Index:
     """Initialize an index with the name of the index in uppercase"""
 
@@ -894,7 +959,8 @@ class Index:
 
         if websocket:
             try:
-                websocket.subscribe('websocket', 1, [{'exchangeType': self.exchange_type, 'tokens': [self.token]}])
+                websocket.subscribe(websocket.correlation_id, 1, [{'exchangeType': self.exchange_type,
+                                                                   'tokens': [self.token]}])
                 sleep(2)
                 print(f'{self.name}: Subscribed underlying to the websocket')
             except Exception as e:
