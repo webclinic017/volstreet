@@ -607,9 +607,13 @@ class PriceFeed(SmartWebSocketV2):
     def on_data_handler(self, wsapp, message):
         self.price_dict[message['token']] = {
             'ltp': message['last_traded_price'] / 100,
+            'best_bid': message['best_5_sell_data'][0]['price'] / 100 if 'best_5_sell_data' in message else None,  # 'best_5_sell_data' is not present in 'mode 1' messages
+            'best_bid_qty': message['best_5_sell_data'][0]['quantity'] if 'best_5_sell_data' in message else None,
+            'best_ask': message['best_5_buy_data'][0]['price'] / 100 if 'best_5_buy_data' in message else None,
+            'best_ask_qty': message['best_5_buy_data'][0]['quantity'] if 'best_5_buy_data' in message else None,
             'timestamp': datetime.fromtimestamp(
-                message['exchange_timestamp'] / 1000).strftime('%H:%M:%S')
-        }
+                message['exchange_timestamp'] / 1000).strftime('%H:%M:%S'),
+            **message}
         self.last_update_time = currenttime()
 
     def parse_price_dict(self):
@@ -618,7 +622,7 @@ class PriceFeed(SmartWebSocketV2):
         new_price_dict.update({'FINNIFTY': {'ltp': self.finnifty_index.fetch_ltp()}})
         return new_price_dict
 
-    def add_index_options(self, *indices, range_of_strikes=10, expiries=None):
+    def add_index_options(self, *indices, range_of_strikes=10, expiries=None, mode=1):
 
         def get_option_tokens(strike, expiry):
             _, c_token = fetch_symbol_token(f'{index.name} {strike} {expiry} CE')
@@ -630,7 +634,7 @@ class PriceFeed(SmartWebSocketV2):
             if expiries is None:
                 expiries_list = [index.current_expiry, index.next_expiry, index.month_expiry]
             else:
-                expiries_list = expiries
+                expiries_list = expiries[index.name]
 
             ltp = index.fetch_ltp()
 
@@ -654,13 +658,14 @@ class PriceFeed(SmartWebSocketV2):
                     print(f'Error in fetching tokens for {strike, expiry} for {index.name}: {e}')
                     call_token_list, put_token_list = ['abc'], ['abc']
                     continue
-            self.subscribe(self.correlation_id, 1, [{'exchangeType': 2,
-                                             'tokens': list(call_token_list) + list(put_token_list)}])
+            token_list = [{'exchangeType': 2,
+                           'tokens': list(call_token_list) + list(put_token_list)}]
+            self.subscribe(self.correlation_id, mode, token_list)
             self.index_option_chains_subscribed.append(index.name)
         sleep(3)
 
-    def update_option_chain(self, sleep_time=5, exit_time=(15, 30), calculate_iv=True, process_iv_log=True,
-                            n_values=100, iv_threshold=1.1):
+    def update_option_chain(self, sleep_time=5, exit_time=(15, 30), process_iv_log=True, market_depth=True,
+                            calculate_iv=True, n_values=100, iv_threshold=1.1):
 
         while currenttime().time() < time(*exit_time):
 
@@ -669,13 +674,13 @@ class PriceFeed(SmartWebSocketV2):
             for index in indices:
                 expiries_subscribed = set([*zip(*self.symbol_option_chains[index].exp_strike_pairs)][0])
                 for expiry in expiries_subscribed:
-                    self.build_option_chain(index, expiry, parsed_dict, calculate_iv, process_iv_log, n_values,
-                                            iv_threshold)
+                    self.build_option_chain(index, expiry, parsed_dict, process_iv_log, market_depth, calculate_iv,
+                                            n_values, iv_threshold)
 
             sleep(sleep_time)
 
-    def build_option_chain(self, index: str, expiry: str, parsed_dict: dict, calculate_iv, process_iv_log,
-                             n_values, iv_threshold):
+    def build_option_chain(self, index: str, expiry: str, parsed_dict: dict, market_depth, process_iv_log,
+                           calculate_iv, n_values, iv_threshold):
 
         instrument_info = parsed_dict[index]
         spot = instrument_info['ltp']
@@ -703,6 +708,16 @@ class PriceFeed(SmartWebSocketV2):
                     if process_iv_log:
                         self.process_iv_log(index, spot, strike, expiry, call_iv, put_iv, avg_iv,
                                             n_values, iv_threshold)
+
+                if market_depth:
+                    self.symbol_option_chains[index][expiry][strike]['call_best_bid'] = info['best_bid']
+                    self.symbol_option_chains[index][expiry][strike]['call_best_ask'] = info['best_ask']
+                    self.symbol_option_chains[index][expiry][strike]['put_best_bid'] = put_option['best_bid']
+                    self.symbol_option_chains[index][expiry][strike]['put_best_ask'] = put_option['best_ask']
+                    self.symbol_option_chains[index][expiry][strike]['call_best_bid_qty'] = info['best_bid_qty']
+                    self.symbol_option_chains[index][expiry][strike]['call_best_ask_qty'] = info['best_ask_qty']
+                    self.symbol_option_chains[index][expiry][strike]['put_best_bid_qty'] = put_option['best_bid_qty']
+                    self.symbol_option_chains[index][expiry][strike]['put_best_ask_qty'] = put_option['best_ask_qty']
 
     def process_iv_log(self, index, spot, strike, expiry, call_iv, put_iv, avg_iv, n_values, iv_threshold):
 
@@ -888,26 +903,40 @@ class SyntheticArbSystem:
         self.symbol_option_chains = symbol_option_chains
         self.index_expiry_pairs = {}
 
-    def get_single_index_single_expiry_prices(self, index, expiry):
+    def get_single_index_single_expiry_data(self, index, expiry):
 
         option_chain = self.symbol_option_chains[index][expiry]
         strikes = [strike for strike in option_chain]
         call_prices = [option_chain[strike]['call_price'] for strike in strikes]
         put_prices = [option_chain[strike]['put_price'] for strike in strikes]
+        call_bids = [option_chain[strike]['call_best_bid'] for strike in strikes]
+        call_asks = [option_chain[strike]['call_best_ask'] for strike in strikes]
+        put_bids = [option_chain[strike]['put_best_bid'] for strike in strikes]
+        put_asks = [option_chain[strike]['put_best_ask'] for strike in strikes]
+        call_bid_qty = [option_chain[strike]['call_best_bid_qty'] for strike in strikes]
+        call_ask_qty = [option_chain[strike]['call_best_ask_qty'] for strike in strikes]
+        put_bid_qty = [option_chain[strike]['put_best_bid_qty'] for strike in strikes]
+        put_ask_qty = [option_chain[strike]['put_best_ask_qty'] for strike in strikes]
 
-        return np.array(strikes), np.array(call_prices), np.array(put_prices)
+        return np.array(strikes), np.array(call_prices), np.array(put_prices), np.array(call_bids), \
+            np.array(call_asks), np.array(put_bids), np.array(put_asks), np.array(call_bid_qty), \
+            np.array(call_ask_qty), np.array(put_bid_qty), np.array(put_ask_qty)
 
     def find_arbitrage_opportunities(self, index, expiry, exit_time=(15, 28), threshold=3):
-        
-        strikes, call_prices, put_prices = self.get_single_index_single_expiry_prices(index, expiry)
-        synthetic_prices = strikes + call_prices - put_prices
-        min_price_index = np.argmin(synthetic_prices)
-        max_price_index = np.argmax(synthetic_prices)
-        min_price = synthetic_prices[min_price_index]
-        max_price = synthetic_prices[max_price_index]
+        strikes, call_prices, put_prices, call_bids, call_asks, put_bids, put_asks, call_bid_qty, call_ask_qty, \
+            put_bid_qty, put_ask_qty = self.get_single_index_single_expiry_data(index, expiry)
+        synthetic_buy_prices = strikes + call_asks - put_bids
+        synthetic_sell_prices = strikes + call_bids - put_asks
+        min_price_index = np.argmin(synthetic_buy_prices)
+        max_price_index = np.argmax(synthetic_sell_prices)
+        min_price = synthetic_buy_prices[min_price_index]
+        max_price = synthetic_sell_prices[max_price_index]
 
         while currenttime().time() < time(*exit_time):
 
+            # print(strikes, call_prices, put_prices, synthetic_prices)
+            print(f'{currenttime()} - {index} - {expiry}: Min Price: {min_price} at {strikes[min_price_index]} | '
+                  f'Max Price: {max_price} at {strikes[max_price_index]} | Difference: {max_price - min_price}')
             if max_price - min_price > threshold:
                 return {
                     'buy_strike': strikes[min_price_index],
@@ -918,11 +947,20 @@ class SyntheticArbSystem:
             for i, strike in enumerate(strikes):
                 call_prices[i] = self.symbol_option_chains[index][expiry][strike]['call_price']
                 put_prices[i] = self.symbol_option_chains[index][expiry][strike]['put_price']
-            synthetic_prices = strikes + call_prices + put_prices
-            min_price_index = np.argmin(synthetic_prices)
-            max_price_index = np.argmax(synthetic_prices)
-            min_price = synthetic_prices[min_price_index]
-            max_price = synthetic_prices[max_price_index]
+                call_bids[i] = self.symbol_option_chains[index][expiry][strike]['call_best_bid']
+                call_asks[i] = self.symbol_option_chains[index][expiry][strike]['call_best_ask']
+                put_bids[i] = self.symbol_option_chains[index][expiry][strike]['put_best_bid']
+                put_asks[i] = self.symbol_option_chains[index][expiry][strike]['put_best_ask']
+                call_bid_qty[i] = self.symbol_option_chains[index][expiry][strike]['call_best_bid_qty']
+                call_ask_qty[i] = self.symbol_option_chains[index][expiry][strike]['call_best_ask_qty']
+                put_bid_qty[i] = self.symbol_option_chains[index][expiry][strike]['put_best_bid_qty']
+                put_ask_qty[i] = self.symbol_option_chains[index][expiry][strike]['put_best_ask_qty']
+            synthetic_buy_prices = strikes + call_asks - put_bids
+            synthetic_sell_prices = strikes + call_bids - put_asks
+            min_price_index = np.argmin(synthetic_buy_prices)
+            max_price_index = np.argmax(synthetic_sell_prices)
+            min_price = synthetic_buy_prices[min_price_index]
+            max_price = synthetic_sell_prices[max_price_index]
 
 
 class Index:
