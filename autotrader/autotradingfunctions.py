@@ -552,6 +552,7 @@ def cancel_pending_orders(order_ids, variety="STOPLOSS"):
 class OptionChains(defaultdict):
     """An object for having option chains for multiple expiries.
     Each expiry is a dictionary with integer default values"""
+
     def __init__(self):
         super().__init__(lambda: defaultdict(lambda: defaultdict(int)))
         self.underlying_price = None
@@ -604,7 +605,8 @@ class PriceFeed(SmartWebSocketV2):
     def on_data_handler(self, wsapp, message):
         self.price_dict[message['token']] = {
             'ltp': message['last_traded_price'] / 100,
-            'best_bid': message['best_5_sell_data'][0]['price'] / 100 if 'best_5_sell_data' in message else None,  # 'best_5_sell_data' is not present in 'mode 1' messages
+            'best_bid': message['best_5_sell_data'][0]['price'] / 100 if 'best_5_sell_data' in message else None,
+            # 'best_5_sell_data' is not present in 'mode 1' messages
             'best_bid_qty': message['best_5_sell_data'][0]['quantity'] if 'best_5_sell_data' in message else None,
             'best_ask': message['best_5_buy_data'][0]['price'] / 100 if 'best_5_buy_data' in message else None,
             'best_ask_qty': message['best_5_buy_data'][0]['quantity'] if 'best_5_buy_data' in message else None,
@@ -630,6 +632,8 @@ class PriceFeed(SmartWebSocketV2):
 
             if expiries is None:
                 expiries_list = [index.current_expiry, index.next_expiry, index.month_expiry]
+            elif expiries == 'current':
+                expiries_list = [index.current_expiry]
             else:
                 expiries_list = expiries[index.name]
 
@@ -697,6 +701,8 @@ class PriceFeed(SmartWebSocketV2):
 
                 if calculate_iv:
                     time_to_expiry = timetoexpiry(expiry)
+                    if time_to_expiry < 3 / (24 * 365):  # If time to expiry is less than 3 hours stop calculating iv
+                        continue
                     call_iv, put_iv, avg_iv = straddle_iv(call_price, put_price, spot, strike, time_to_expiry)
                     self.symbol_option_chains[index][expiry][strike]['call_iv'] = call_iv
                     self.symbol_option_chains[index][expiry][strike]['put_iv'] = put_iv
@@ -806,7 +812,7 @@ class Option:
 
     def __repr__(self):
         return f'{self.__class__.__name__}(strike={self.strike}, option_type={self.option_type}, ' \
-                  f'underlying={self.underlying}, expiry={self.expiry})'
+               f'underlying={self.underlying}, expiry={self.expiry})'
 
     def __hash__(self):
         return hash((self.strike, self.option_type, self.underlying, self.expiry))
@@ -870,7 +876,7 @@ class Strangle:
         self.put_symbol, self.put_token = self.put_option.fetch_symbol_token()
 
     def __repr__(self):
-        return f'{self.__class__.__name__}(callstrike={self.call_option.strike}, putstrike={self.put_option.strike}, '\
+        return f'{self.__class__.__name__}(callstrike={self.call_option.strike}, putstrike={self.put_option.strike}, ' \
                f'underlying={self.underlying}, expiry={self.expiry})'
 
     def __hash__(self):
@@ -878,11 +884,11 @@ class Strangle:
 
     def fetch_ltp(self):
         return fetchltp('NFO', self.call_symbol, self.call_token), \
-                  fetchltp('NFO', self.put_symbol, self.put_token)
+            fetchltp('NFO', self.put_symbol, self.put_token)
 
     def fetch_total_ltp(self):
         call_ltp, put_ltp = fetchltp('NFO', self.call_symbol, self.call_token), \
-                            fetchltp('NFO', self.put_symbol, self.put_token)
+            fetchltp('NFO', self.put_symbol, self.put_token)
         return call_ltp + put_ltp
 
     def fetch_symbol_token(self):
@@ -944,7 +950,7 @@ class SyntheticArbSystem:
                 print(f'**********Trade Identified at on strike: Min {strikes[min_price_index]} '
                       f'and Max {strikes[max_price_index]}**********\n'
                       f'Price difference: {max_price - min_price}\n'
-                      f'Expected Profit: {(max_price - min_price)*qty}\n')
+                      f'Expected Profit: {(max_price - min_price) * qty}\n')
                 min_strike = strikes[min_price_index]
                 max_strike = strikes[max_price_index]
                 min_strike_call_ask = call_asks[min_price_index]
@@ -1411,7 +1417,8 @@ class Index:
         trade_data[self.name] = sell_strike
         save_data(trade_data)
 
-    def buy_weekly_hedge(self, quantity_in_lots, type_of_hedge='strangle', strike_offset=1, call_offset=1, put_offset=1):
+    def buy_weekly_hedge(self, quantity_in_lots, type_of_hedge='strangle', strike_offset=1, call_offset=1,
+                         put_offset=1):
 
         ltp = self.fetch_ltp()
         if type_of_hedge == 'strangle':
@@ -1533,7 +1540,7 @@ class Index:
         traded_call_iv, traded_put_iv, traded_avg_iv = straddle_iv(call_avg_price, put_avg_price, entry_spot,
                                                                    equal_strike, timetoexpiry(expiry))
 
-        summary_message += f'\nTraded IV: {traded_avg_iv*100:0.2f}'
+        summary_message += f'\nTraded IV: {traded_avg_iv * 100:0.2f}'
         notifier(summary_message, self.webhook_url)
         sleep(1)
 
@@ -1561,8 +1568,8 @@ class Index:
             # Hedge settings
             ctb_notification_sent = False
             ctb_message = ''
-            profit_if_call_sl = put_avg_price - (call_avg_price * (sl-1))
-            profit_if_put_sl = call_avg_price - (put_avg_price * (sl-1))
+            profit_if_call_sl = put_avg_price - (call_avg_price * (sl - 1))
+            profit_if_put_sl = call_avg_price - (put_avg_price * (sl - 1))
             ctb_threshold = max(profit_if_call_sl, profit_if_put_sl)
 
             def process_ctc(profit_threshold):
@@ -1572,7 +1579,7 @@ class Index:
                 hedges = np.array([Strangle(pair[0], pair[1], self.name, expiry) for pair in hedges])
                 hedges_ltps = np.array([hedge.fetch_total_ltp() for hedge in hedges])
                 distance_from_equal_strike = np.array([hedge.call_option - equal_strike if hedge.call_option <
-                                                       equal_strike else hedge.put_option - equal_strike
+                                                                                           equal_strike else hedge.put_option - equal_strike
                                                        for hedge in hedges])
                 hedge_profits = total_avg_price - hedges_ltps + distance_from_equal_strike
                 filtered_hedge = hedges[np.where(hedge_profits > profit_threshold)]
@@ -1664,7 +1671,7 @@ class Index:
                           stoploss_message +
                           f'Total price: {call_price + put_price:0.2f}\nMTM Price: {mtm_price:0.2f}\n' +
                           f'Profit in points: {profit_in_pts:0.2f}\n' +
-                          f'Profit Value: {profit_in_rs:0.2f}\nIV: {avg_iv*100:0.2f}\nSmart Exit: {smart_exit_trg}\n' +
+                          f'Profit Value: {profit_in_rs:0.2f}\nIV: {avg_iv * 100:0.2f}\nSmart Exit: {smart_exit_trg}\n' +
                           ctb_message)
                     last_print_time = currenttime()
 

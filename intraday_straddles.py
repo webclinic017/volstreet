@@ -41,6 +41,7 @@ parameters = dict(
     safeguard=True,
     safeguard_movement=0.003,
     safeguard_spike=1.2,
+    convert_to_butterfly=True,
 )
 
 # If today is a holiday, the script will exit
