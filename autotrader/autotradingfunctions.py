@@ -521,27 +521,24 @@ def placeSLorder(symbol, token, qty, buyorsell, triggerprice, ordertag=""):
             continue
 
 
-def place_synthetic_fut_order(name, strike, expiry, buy_or_sell, quantity, price='MARKET'):
+def place_synthetic_fut_order(name, strike, expiry, buy_or_sell, quantity, prices: str | tuple = 'MARKET'):
     """Places a synthetic future order. Quantity is in number of shares."""
 
+    strike = int(strike)
     call_symbol, call_token = fetch_symbol_token(f'{name} {strike} {expiry} CE')
     put_symbol, put_token = fetch_symbol_token(f'{name} {strike} {expiry} PE')
 
-    if buy_or_sell == 'BUY':
-        order_id_call = placeorder(call_symbol, call_token, quantity, 'BUY', 'MARKET')
-        order_id_put = placeorder(put_symbol, put_token, quantity, 'SELL', 'MARKET')
-    elif buy_or_sell == 'SELL':
-        order_id_call = placeorder(call_symbol, call_token, quantity, 'SELL', 'MARKET')
-        order_id_put = placeorder(put_symbol, put_token, quantity, 'BUY', 'MARKET')
+    if prices == 'MARKET':
+        call_price = 'MARKET'
+        put_price = 'MARKET'
     else:
-        raise Exception('Invalid buy or sell')
+        call_price, put_price = prices
 
-    order_statuses = lookup_and_return('orderbook', 'orderid', [order_id_call, order_id_put], 'status')
-
-    if not all(order_statuses == 'complete'):
-        raise Exception('Syntehtic Futs: Orders not completed')
-    else:
-        print(f'Synthetic Futs: {buy_or_sell} Order for {quantity} quantity completed.')
+    call_action = 'BUY' if buy_or_sell == 'BUY' else 'SELL'
+    put_action = 'SELL' if buy_or_sell == 'BUY' else 'BUY'
+    order_id_call = placeorder(call_symbol, call_token, quantity, call_action, call_price)
+    order_id_put = placeorder(put_symbol, put_token, quantity, put_action, put_price)
+    return order_id_call, order_id_put
 
 
 def cancel_pending_orders(order_ids, variety="STOPLOSS"):
@@ -922,7 +919,7 @@ class SyntheticArbSystem:
             np.array(call_asks), np.array(put_bids), np.array(put_asks), np.array(call_bid_qty), \
             np.array(call_ask_qty), np.array(put_bid_qty), np.array(put_ask_qty)
 
-    def find_arbitrage_opportunities(self, index, expiry, exit_time=(15, 28), threshold=3):
+    def find_arbitrage_opportunities(self, index, expiry, qty, exit_time=(15, 28), threshold=3):
         strikes, call_prices, put_prices, call_bids, call_asks, put_bids, put_asks, call_bid_qty, call_ask_qty, \
             put_bid_qty, put_ask_qty = self.get_single_index_single_expiry_data(index, expiry)
         synthetic_buy_prices = strikes + call_asks - put_bids
@@ -932,17 +929,33 @@ class SyntheticArbSystem:
         min_price = synthetic_buy_prices[min_price_index]
         max_price = synthetic_sell_prices[max_price_index]
 
+        last_print_time = currenttime()
         while currenttime().time() < time(*exit_time):
 
             # print(strikes, call_prices, put_prices, synthetic_prices)
-            print(f'{currenttime()} - {index} - {expiry}: Min Price: {min_price} at {strikes[min_price_index]} | '
-                  f'Max Price: {max_price} at {strikes[max_price_index]} | Difference: {max_price - min_price}')
+            if currenttime() > last_print_time + timedelta(seconds=5):
+                print(f'{currenttime()} - {index} - {expiry}:\n'
+                      f'Minimum price: {min_price} at strike: {strikes[min_price_index]} Call Ask: {call_asks[min_price_index]} Put Bid: {put_bids[min_price_index]}\n'
+                      f'Maximum price: {max_price} at strike: {strikes[max_price_index]} Call Bid: {call_bids[max_price_index]} Put Ask: {put_asks[max_price_index]}\n'
+                      f'Price difference: {max_price - min_price}\n')
+                last_print_time = currenttime()
+
             if max_price - min_price > threshold:
-                return {
-                    'buy_strike': strikes[min_price_index],
-                    'sell_strike': strikes[max_price_index],
-                    'price_difference': max_price - min_price
-                }
+                print(f'**********Trade Identified at on strike: Min {strikes[min_price_index]} '
+                      f'and Max {strikes[max_price_index]}**********\n'
+                      f'Price difference: {max_price - min_price}\n'
+                      f'Expected Profit: {(max_price - min_price)*qty}\n')
+                min_strike = strikes[min_price_index]
+                max_strike = strikes[max_price_index]
+                min_strike_call_ask = call_asks[min_price_index]
+                min_strike_put_bid = put_bids[min_price_index]
+                max_strike_call_bid = call_bids[max_price_index]
+                max_strike_put_ask = put_asks[max_price_index]
+                place_synthetic_fut_order(index, min_strike, expiry, 'BUY',
+                                          qty, (min_strike_call_ask, min_strike_put_bid))
+                place_synthetic_fut_order(index, max_strike, expiry, 'SELL',
+                                          qty, (max_strike_call_bid, max_strike_put_ask))
+                sleep(1)
 
             for i, strike in enumerate(strikes):
                 call_prices[i] = self.symbol_option_chains[index][expiry][strike]['call_price']
@@ -961,6 +974,9 @@ class SyntheticArbSystem:
             max_price_index = np.argmax(synthetic_sell_prices)
             min_price = synthetic_buy_prices[min_price_index]
             max_price = synthetic_sell_prices[max_price_index]
+
+    def execute_synthetic_trade(self, index, expiry, buy_strike_info: tuple, sell_strike_info: tuple):
+        pass
 
 
 class Index:
@@ -1421,8 +1437,7 @@ class Index:
                           move_sl=False, shared_data=None, stoploss='dynamic', target_disparity=10,
                           catch_trend=False, trend_qty_ratio=0.5, trend_catcher_sl=0.003, safeguard=False,
                           safeguard_movement=0.0035, safeguard_spike=1.2, smart_exit=False,
-                          take_profit=False, take_profit_points=np.inf, take_profit_order=False,
-                          convert_to_butterfly=False):
+                          take_profit=False, take_profit_points=np.inf, convert_to_butterfly=False):
 
         """ Params:
                 quantity_in_lots: int
@@ -1489,11 +1504,13 @@ class Index:
 
         call_stoploss_order_ids = []
         put_stoploss_order_ids = []
+        time_tag = currenttime().time().strftime('%H%M%S%f')
+        stoploss_tag = f'{self.name} {time_tag} stoploss'
         for quantity in spliced_orders:
             call_sl_order_id = placeSLorder(call_symbol, call_token, quantity * self.lot_size,
-                                            'BUY', call_avg_price * sl, 'Stoploss')
+                                            'BUY', call_avg_price * sl, stoploss_tag)
             put_sl_order_id = placeSLorder(put_symbol, put_token, quantity * self.lot_size,
-                                           'BUY', put_avg_price * sl, 'Stoploss')
+                                           'BUY', put_avg_price * sl, stoploss_tag)
             call_stoploss_order_ids.append(call_sl_order_id)
             put_stoploss_order_ids.append(put_sl_order_id)
             sleep(0.3)
@@ -1664,7 +1681,7 @@ class Index:
                 return False, False
 
             elif all(statuses == "rejected") or all(statuses == "cancelled"):
-                rejection_reasons = lookup_and_return(order_book, 'order_id', order_ids, 'text')
+                rejection_reasons = lookup_and_return(order_book, 'orderid', order_ids, 'text')
                 if all(rejection_reasons == "17070 : The Price is out of the LPP range"):
                     return True, False
                 else:
@@ -1983,7 +2000,7 @@ class Index:
 
         # New code for cancelling pending orders
         pending_order_ids = lookup_and_return('orderbook', ['ordertag', 'status'],
-                                              ['Stoploss', 'trigger pending'], 'orderid')
+                                              [stoploss_tag, 'trigger pending'], 'orderid')
 
         if pending_order_ids != 0:
             cancel_pending_orders(pending_order_ids)
