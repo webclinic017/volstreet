@@ -1533,7 +1533,7 @@ class Index:
         traded_call_iv, traded_put_iv, traded_avg_iv = straddle_iv(call_avg_price, put_avg_price, entry_spot,
                                                                    equal_strike, timetoexpiry(expiry))
 
-        summary_message += f'\nTraded IV: {traded_avg_iv}'
+        summary_message += f'\nTraded IV: {traded_avg_iv*100:0.2f}'
         notifier(summary_message, self.webhook_url)
         sleep(1)
 
@@ -1664,7 +1664,7 @@ class Index:
                           stoploss_message +
                           f'Total price: {call_price + put_price:0.2f}\nMTM Price: {mtm_price:0.2f}\n' +
                           f'Profit in points: {profit_in_pts:0.2f}\n' +
-                          f'Profit Value: {profit_in_rs:0.2f}\nIV: {avg_iv}\nSmart Exit: {smart_exit_trg}\n' +
+                          f'Profit Value: {profit_in_rs:0.2f}\nIV: {avg_iv*100:0.2f}\nSmart Exit: {smart_exit_trg}\n' +
                           ctb_message)
                     last_print_time = currenttime()
 
@@ -1768,14 +1768,15 @@ class Index:
                     if (movement_from_entry < safeguard_movement and
                             (iv_spike > safeguard_spike or price_spike > safeguard_spike)):
                         notifier(f'{self.name} {side.capitalize()} stoploss triggered without much '
-                                 f'movement in the underlying or because of IV spike.\n'
-                                 f'Movement: {movement_from_entry * 100:0.2f}. IV spike: {iv_spike}', self.webhook_url)
+                                 f'movement in the underlying or because of IV/Price spike.\n'
+                                 f'Movement: {movement_from_entry * 100:0.2f}\nPresent IV: {present_iv}\n'
+                                 f'IV spike: {iv_spike}\nIdeal Price: {ideal_price}\nPresent Price: {present_price}\n'
+                                 f'Price Spike: {price_spike}', self.webhook_url)
                     else:
                         notifier(f'{self.name} {side.capitalize()} stoploss triggered. '
-                                 f'Movement: {movement_from_entry * 100:0.2f}. '
-                                 f'IV spike: {iv_spike}',
-                                 self.webhook_url)
-
+                                 f'Movement: {movement_from_entry * 100:0.2f}\nPresent IV: {present_iv}\n'
+                                 f'IV spike: {iv_spike}\nIdeal Price: {ideal_price}\nPresent Price: {present_price}\n'
+                                 f'Price Spike: {price_spike}', self.webhook_url)
             if complete:
                 exit_price = (
                     lookup_and_return(orderbook, "orderid", order_ids, "averageprice")
@@ -1864,7 +1865,7 @@ class Index:
                 other_stoploss_order_ids.clear()
                 for qty in spliced_orders:
                     sl_order_id = placeSLorder(other_symbol, other_token, qty * self.lot_size,
-                                               'BUY', other_avg_price, f'Stoploss')
+                                               'BUY', other_avg_price, stoploss_tag)
                     other_stoploss_order_ids.append(sl_order_id)
 
             # notifier(f'{self.name} {sl_type} stoploss triggered and completed.', self.webhook_url)
