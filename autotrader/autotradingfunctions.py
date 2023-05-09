@@ -675,7 +675,7 @@ class PriceFeed(SmartWebSocketV2):
             for index in indices:
                 expiries_subscribed = set([*zip(*self.symbol_option_chains[index].exp_strike_pairs)][0])
                 for expiry in expiries_subscribed:
-                    self.build_option_chain(index, expiry, parsed_dict, process_iv_log, market_depth, calculate_iv,
+                    self.build_option_chain(index, expiry, parsed_dict, market_depth, process_iv_log, calculate_iv,
                                             n_values, iv_threshold)
 
             sleep(sleep_time)
