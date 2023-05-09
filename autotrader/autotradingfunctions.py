@@ -2002,8 +2002,10 @@ class Index:
         pending_order_ids = lookup_and_return('orderbook', ['ordertag', 'status'],
                                               [stoploss_tag, 'trigger pending'], 'orderid')
 
-        if pending_order_ids != 0:
+        if isinstance(pending_order_ids, (str, np.ndarray)):
             cancel_pending_orders(pending_order_ids)
+        else:
+            logger1.error(f'{self.name}: Invalid pending order ids {pending_order_ids}')
 
         # Exit price information
         c_exit_price = call_exit_price if sl_hit_call else call_price
