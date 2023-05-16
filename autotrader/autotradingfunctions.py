@@ -1468,6 +1468,7 @@ class Index:
         """
 
         order_tag = 'Intraday straddle'
+        strategy_id = currenttime().strftime('%d%m%y%H%M%S%f')
         expiry = self.current_expiry
         sleep_interval = 3 if shared_data is None and not take_profit else 0
 
@@ -1511,8 +1512,7 @@ class Index:
 
         call_stoploss_order_ids = []
         put_stoploss_order_ids = []
-        time_tag = currenttime().time().strftime('%H%M%S%f')
-        stoploss_tag = f'{self.name} {time_tag} stoploss'
+        stoploss_tag = f'{self.name} {strategy_id} stoploss'
         for quantity in spliced_orders:
             call_sl_order_id = placeSLorder(call_symbol, call_token, quantity * self.lot_size,
                                             'BUY', call_avg_price * sl, stoploss_tag)
@@ -1663,7 +1663,7 @@ class Index:
                 if putsl:
                     stoploss_message += f'Put Exit Price: {mtm_pe_price}\nIncr. Gains: {incremental_gains}\n' + \
                                         f'Avg. Delta: {average_delta}\n'
-
+                print_iv = avg_iv if avg_iv is not None else 0
                 if currenttime() - last_print_time > print_interval:
                     print(f'Index: {self.name}\nTime: {currenttime().time()}\nStrike: {equal_strike}\n' +
                           f'Underlying Price: {underlying_price}\nCall SL: {callsl}\nPut SL: {putsl}\n' +
@@ -1671,7 +1671,7 @@ class Index:
                           stoploss_message +
                           f'Total price: {call_price + put_price:0.2f}\nMTM Price: {mtm_price:0.2f}\n' +
                           f'Profit in points: {profit_in_pts:0.2f}\n' +
-                          f'Profit Value: {profit_in_rs:0.2f}\nIV: {avg_iv * 100:0.2f}\nSmart Exit: {smart_exit_trg}\n' +
+                          f'Profit Value: {profit_in_rs:0.2f}\nIV: {print_iv * 100:0.2f}\nSmart Exit: {smart_exit_trg}\n' +
                           ctb_message)
                     last_print_time = currenttime()
 
