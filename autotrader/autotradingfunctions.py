@@ -250,13 +250,22 @@ def fetch_lot_size(name):
     return int(scrips.loc[(scrips.symbol.str.startswith(name)) & (scrips.exch_seg == 'NFO'), 'lotsize'].iloc[0])
 
 
-def fetch_symbol_token(name):
+def fetch_symbol_token(name=None, expiry=None, strike=None, option_type=None, tokens=None):
     """Fetches symbol & token for a given scrip name. Provide just a single world if
     you want to fetch the symbol & token for the cash segment. If you want to fetch the
-    symbol & token for the options segment, provide name in the format '{name} {strike} {expiry} {option_type}'.
-    Expiry should be in the DDMMMYY format. Optiontype should be CE or PE."""
+    symbol & token for the options segment, provide name, strike, expiry, option_type.
+    Expiry should be in the DDMMMYY format. Optiontype should be CE or PE. Optionally, provide
+    a list of tokens to fetch the corresponding symbols."""
 
-    if len(name.split()) == 1:
+    if tokens is None and name is None:
+        raise ValueError('Either name or tokens must be specified.')
+
+    if tokens is not None:
+        token_df = scrips.loc[scrips['token'].isin(tokens)]
+        symbol_token_pairs = [(token_df.loc[token_df['token'] == token, 'symbol'].values[0], token) for token in tokens]
+        return symbol_token_pairs
+
+    if expiry is None and strike is None and option_type is None:
         if name in ['BANKNIFTY', 'NIFTY']:
             symbol, token = scrips.loc[(scrips.name == name) &
                                        (scrips.exch_seg == 'NSE'), ['symbol', 'token']].values[0]
@@ -272,13 +281,12 @@ def fetch_symbol_token(name):
                 (scrips.exch_seg == 'NSE') &
                 (scrips.symbol.str.endswith('EQ')), ['symbol', 'token']
             ].values[0]
-    elif len(name.split()) == 4:
-        name, strike, expiry, option_type = name.split()
-        symbol = name + expiry + str(strike) + option_type
+    elif expiry is not None and strike is not None and option_type is not None:
+        strike = str(int(strike))  # Handle float strikes, convert to integer first
+        symbol = name + expiry + strike + option_type
         token = scrips[scrips.symbol == symbol]['token'].tolist()[0]
-
     else:
-        raise ValueError('Invalid name')
+        raise ValueError('Invalid arguments')
 
     return symbol, token
 
@@ -322,8 +330,8 @@ def fetch_straddle_price(name, expiry, strike, return_total_price=False):
     If return_total_price is True, then the total price of the straddle is returned. If return_total_price is False,
     then the price of the call and put is returned as a tuple."""
 
-    call_symbol, call_token = fetch_symbol_token(f'{name} {strike} {expiry} CE')
-    put_symbol, put_token = fetch_symbol_token(f'{name} {strike} {expiry} PE')
+    call_symbol, call_token = fetch_symbol_token(name, expiry, strike, 'CE')
+    put_symbol, put_token = fetch_symbol_token(name, expiry, strike, 'PE')
     call_ltp = fetchltp('NFO', call_symbol, call_token)
     put_ltp = fetchltp('NFO', put_symbol, put_token)
     if return_total_price:
@@ -337,8 +345,8 @@ def fetch_strangle_price(name, expiry, call_strike, put_strike, return_total_pri
     If return_total_price is True, then the total price of the strangle is returned. If return_total_price is False,
     then the price of the call and put is returned as a tuple."""
 
-    call_symbol, call_token = fetch_symbol_token(f'{name} {call_strike} {expiry} CE')
-    put_symbol, put_token = fetch_symbol_token(f'{name} {put_strike} {expiry} PE')
+    call_symbol, call_token = fetch_symbol_token(name, expiry, call_strike, 'CE')
+    put_symbol, put_token = fetch_symbol_token(name, expiry, put_strike, 'PE')
     call_ltp = fetchltp('NFO', call_symbol, call_token)
     put_ltp = fetchltp('NFO', put_symbol, put_token)
     if return_total_price:
@@ -525,8 +533,8 @@ def place_synthetic_fut_order(name, strike, expiry, buy_or_sell, quantity, price
     """Places a synthetic future order. Quantity is in number of shares."""
 
     strike = int(strike)
-    call_symbol, call_token = fetch_symbol_token(f'{name} {strike} {expiry} CE')
-    put_symbol, put_token = fetch_symbol_token(f'{name} {strike} {expiry} PE')
+    call_symbol, call_token = fetch_symbol_token(name, expiry, strike, 'CE')
+    put_symbol, put_token = fetch_symbol_token(name, expiry, strike, 'PE')
 
     if prices == 'MARKET':
         call_price = 'MARKET'
@@ -624,8 +632,8 @@ class PriceFeed(SmartWebSocketV2):
     def add_index_options(self, *indices, range_of_strikes=10, expiries=None, mode=1):
 
         def get_option_tokens(strike, expiry):
-            _, c_token = fetch_symbol_token(f'{index.name} {strike} {expiry} CE')
-            _, p_token = fetch_symbol_token(f'{index.name} {strike} {expiry} PE')
+            _, c_token = fetch_symbol_token(index.name, expiry, strike, 'CE')
+            _, p_token = fetch_symbol_token(index.name, expiry, strike, 'PE')
             return c_token, p_token
 
         for index in indices:
@@ -807,8 +815,7 @@ class Option:
         self.option_type = option_type
         self.underlying = underlying
         self.expiry = expiry
-        self.symbol, self.token = fetch_symbol_token(f'{self.underlying} {self.strike} '
-                                                     f'{self.expiry} {self.option_type}')
+        self.symbol, self.token = fetch_symbol_token(underlying, expiry, strike, option_type)
 
     def __repr__(self):
         return f'{self.__class__.__name__}(strike={self.strike}, option_type={self.option_type}, ' \
@@ -905,6 +912,8 @@ class SyntheticArbSystem:
     def __init__(self, symbol_option_chains):
         self.symbol_option_chains = symbol_option_chains
         self.index_expiry_pairs = {}
+        self.successful_trades = 0
+        self.unsuccessful_trades = 0
 
     def get_single_index_single_expiry_data(self, index, expiry):
 
@@ -957,11 +966,9 @@ class SyntheticArbSystem:
                 min_strike_put_bid = put_bids[min_price_index]
                 max_strike_call_bid = call_bids[max_price_index]
                 max_strike_put_ask = put_asks[max_price_index]
-                place_synthetic_fut_order(index, min_strike, expiry, 'BUY',
-                                          qty, (min_strike_call_ask, min_strike_put_bid))
-                place_synthetic_fut_order(index, max_strike, expiry, 'SELL',
-                                          qty, (max_strike_call_bid, max_strike_put_ask))
-                sleep(1)
+                self.execute_synthetic_trade(index, expiry, qty, min_strike, (min_strike_call_ask, min_strike_put_bid),
+                                             max_strike, (max_strike_call_bid, max_strike_put_ask),
+                                             sleep_interval=5)
 
             for i, strike in enumerate(strikes):
                 call_prices[i] = self.symbol_option_chains[index][expiry][strike]['call_price']
@@ -981,8 +988,41 @@ class SyntheticArbSystem:
             min_price = synthetic_buy_prices[min_price_index]
             max_price = synthetic_sell_prices[max_price_index]
 
-    def execute_synthetic_trade(self, index, expiry, buy_strike_info: tuple, sell_strike_info: tuple):
-        pass
+    def execute_synthetic_trade(self, index, expiry, qty, buy_strike, buy_strike_prices, sell_strike,
+                                sell_strike_prices, sleep_interval=1):
+        id_call_buy, id_put_sell = place_synthetic_fut_order(index, buy_strike, expiry, 'BUY', qty, buy_strike_prices)
+        id_call_sell, id_put_buy = place_synthetic_fut_order(index, sell_strike, expiry, 'SELL', qty,
+                                                             sell_strike_prices)
+        ids = [id_call_buy, id_put_sell, id_call_sell, id_put_buy]
+        call_buy_token, call_buy_symbol = fetch_symbol_token(index, expiry, buy_strike, 'CE')
+        put_sell_token, put_sell_symbol = fetch_symbol_token(index, expiry, buy_strike, 'PE')
+        call_sell_token, call_sell_symbol = fetch_symbol_token(index, expiry, sell_strike, 'CE')
+        put_buy_token, put_buy_symbol = fetch_symbol_token(index, expiry, sell_strike, 'PE')
+        sleep(sleep_interval)
+        statuses = lookup_and_return('orderbook', 'orderid', ids, 'status')
+        if any(statuses == 'open'):
+            # Finding the open order ids using statues and ids and cancelling them in the fastest way possible
+            open_order_ids = [ids[i] for i, status in enumerate(statuses) if status == 'open']
+            cancel_pending_orders(open_order_ids)
+
+            # Reversing the trade which got executed
+            for i, status in enumerate(statuses):
+                if status == 'complete':
+                    if i == 0:
+                        placeorder(call_buy_token, call_buy_symbol, qty, 'SELL', 'MARKET')
+                    elif i == 1:
+                        placeorder(put_sell_token, put_sell_symbol, qty, 'BUY', 'MARKET')
+                    elif i == 2:
+                        placeorder(call_sell_token, call_sell_symbol, qty, 'BUY', 'MARKET')
+                    elif i == 3:
+                        placeorder(put_buy_token, put_buy_symbol, qty, 'SELL', 'MARKET')
+            logger2.info(f'Order cancelled and reversed for {index} {expiry} {qty} Buy {buy_strike} Sell {sell_strike}')
+            self.unsuccessful_trades += 1
+        elif all(statuses == 'complete'):
+            self.successful_trades += 1
+            logger1.info(f'Order executed for {index} {expiry} {qty} Buy {buy_strike} Sell {sell_strike}')
+        elif any(statuses == 'rejected'):
+            logger1.error(f'Order rejected for {index} {expiry} {qty} Buy {buy_strike} Sell {sell_strike}')
 
 
 class Index:
@@ -1149,8 +1189,8 @@ class Index:
         else:
             raise ValueError('Strike price specified twice')
 
-        call_symbol, call_token = fetch_symbol_token(f'{self.name} {call_strike} {expiry} CE')
-        put_symbol, put_token = fetch_symbol_token(f'{self.name} {put_strike} {expiry} PE')
+        call_symbol, call_token = fetch_symbol_token(self.name, expiry, call_strike, 'CE')
+        put_symbol, put_token = fetch_symbol_token(self.name, expiry, put_strike, 'PE')
         call_price = fetchltp('NFO', call_symbol, call_token)
         put_price = fetchltp('NFO', put_symbol, put_token)
 
@@ -1216,8 +1256,8 @@ class Index:
         else:
             spliced_orders = [quantity]
 
-        call_symbol, call_token = fetch_symbol_token(f'{self.name} {strike} {expiry} CE')
-        put_symbol, put_token = fetch_symbol_token(f'{self.name} {strike} {expiry} PE')
+        call_symbol, call_token = fetch_symbol_token(self.name, expiry, strike, 'CE')
+        put_symbol, put_token = fetch_symbol_token(self.name, expiry, strike, 'PE')
 
         call_order_id_list = []
         put_order_id_list = []
@@ -1248,8 +1288,8 @@ class Index:
         strike_range = np.arange(current_strike - self.base * 2, current_strike + self.base * 2, self.base)
 
         def fetch_data(strike, exp):
-            c_symbol, c_token = fetch_symbol_token(f'{self.name} {strike} {exp} CE')
-            p_symbol, p_token = fetch_symbol_token(f'{self.name} {strike} {exp} PE')
+            c_symbol, c_token = fetch_symbol_token(self.name, exp, strike, 'CE')
+            p_symbol, p_token = fetch_symbol_token(self.name, exp, strike, 'PE')
             return c_symbol, c_token, p_symbol, p_token
 
         def fetch_ltps(tokens, symbols, socket):
@@ -1539,8 +1579,8 @@ class Index:
 
         traded_call_iv, traded_put_iv, traded_avg_iv = straddle_iv(call_avg_price, put_avg_price, entry_spot,
                                                                    equal_strike, timetoexpiry(expiry))
-
-        summary_message += f'\nTraded IV: {traded_avg_iv * 100:0.2f}'
+        summary_iv = traded_avg_iv if traded_avg_iv is not None else 0
+        summary_message += f'\nTraded IV: {summary_iv * 100:0.2f}'
         notifier(summary_message, self.webhook_url)
         sleep(1)
 
@@ -1810,8 +1850,7 @@ class Index:
 
             strike = findstrike(underlying_price, self.base)
             opt_type = "PE" if sl_type == "call" else "CE"
-            symbol, token = fetch_symbol_token(
-                f'{self.name} {strike} {expiry} {opt_type}')
+            symbol, token = fetch_symbol_token(self.name, expiry, strike, opt_type)
             option_ltp = fetchltp('NFO', symbol, token)
             qty = max(int(quantity_in_lots * qty_ratio), 1)
             trend_spliced_orders = self.splice_orders(qty)
