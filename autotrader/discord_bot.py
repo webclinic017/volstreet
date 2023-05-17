@@ -1,7 +1,7 @@
 from discord.ext import commands
 import discord
 
-prefix = '!'
+prefix = "!"
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -23,13 +23,13 @@ def find_index_by_name(index_name, indices):
     return None
 
 
-@bot.command(name='exit')
+@bot.command(name="exit")
 async def exit_strats(ctx, *exit_indices):
     for index in exit_indices:
         # Pass the bot.indices list to the find_index_by_name function
         e_index = find_index_by_name(index, bot.indices)
         if e_index is not None and e_index.traded:
             e_index.intraday_straddle_forced_exit = True
-            await ctx.send(f'Exiting {e_index.name}')
+            await ctx.send(f"Exiting {e_index.name}")
         else:
-            await ctx.send(f'Index {index} not found or not traded.')
+            await ctx.send(f"Index {index} not found or not traded.")
