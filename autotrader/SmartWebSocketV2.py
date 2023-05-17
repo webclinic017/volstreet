@@ -26,7 +26,7 @@ class SmartWebSocketV2(object):
     RESUBSCRIBE_FLAG = False
     # HB_THREAD_FLAG = True
     CLOSE_CONNECTION = False
-    MAX_RETRY_ATTEMPT = 1
+    MAX_RETRY_ATTEMPT = 5
 
     # Available Actions
     SUBSCRIBE_ACTION = 1

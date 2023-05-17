@@ -9,9 +9,10 @@ from smartapi.smartExceptions import DataException
 import pyotp
 from threading import Thread
 from autotrader.SmartWebSocketV2 import SmartWebSocketV2
-from autotrader import scrips, holidays, blackscholes as bs
+from autotrader import scrips, holidays, symbol_df, blackscholes as bs
 from collections import defaultdict
 import yfinance as yf
+from fuzzywuzzy import process
 import re
 import logging
 import functools
@@ -20,6 +21,7 @@ import itertools
 global login_data, obj
 
 large_order_threshold = 10
+scrips['expiry_dt'] = pd.to_datetime(scrips[scrips.expiry != '']['expiry'], format='%d%b%Y')
 
 
 def create_logger(name, level, log_file_prefix):
@@ -247,7 +249,17 @@ def spot_price_from_future(future_price, interest_rate, time_to_future):
 
 
 def fetch_lot_size(name):
-    return int(scrips.loc[(scrips.symbol.str.startswith(name)) & (scrips.exch_seg == 'NFO'), 'lotsize'].iloc[0])
+    return int(scrips.loc[(scrips.name == name) & (scrips.exch_seg == 'NFO'), 'lotsize'].iloc[0])
+
+
+def get_base(name):
+    strike_array = scrips.loc[(scrips.name == name) & (scrips.exch_seg == 'NFO')].sort_values('expiry_dt')
+    closest_expiry = strike_array.expiry_dt.iloc[0]
+    strike_array = strike_array.loc[strike_array.expiry_dt == closest_expiry]['strike']/100
+    strike_differences = np.diff(strike_array.sort_values().unique())
+    values, counts = np.unique(strike_differences, return_counts=True)
+    mode = values[np.argmax(counts)]
+    return mode
 
 
 def fetch_symbol_token(name=None, expiry=None, strike=None, option_type=None, tokens=None):
@@ -289,6 +301,38 @@ def fetch_symbol_token(name=None, expiry=None, strike=None, option_type=None, to
         raise ValueError('Invalid arguments')
 
     return symbol, token
+
+
+def get_straddle_symbol_tokens(name, strike, expiry):
+    c_symbol, c_token = fetch_symbol_token(name, expiry, strike, 'CE')
+    p_symbol, p_token = fetch_symbol_token(name, expiry, strike, 'PE')
+    return c_symbol, c_token, p_symbol, p_token
+
+
+def get_available_strikes_for_each_expiry(name, both_pairs=False):
+    mask = (scrips.name == name) & (scrips.exch_seg == 'NFO') & (scrips.instrumenttype.str.startswith('OPT'))
+    filtered = scrips.loc[mask].copy()
+    filtered['strike'] = filtered['strike']/100
+    filtered_dict = filtered.groupby('expiry')['strike'].unique().apply(list).apply(sorted).to_dict()
+    new_keys = map(lambda x: datetime.strptime(x, '%d%b%Y').strftime('%d%b%y').upper(), filtered_dict.keys())
+    filtered_dict = {k: v for k, v in zip(new_keys, filtered_dict.values())}
+    sorted_dict = {k: filtered_dict[k] for k in sorted(filtered_dict, key=lambda x: datetime.strptime(x, '%d%b%y'))}
+    if not both_pairs:
+        return sorted_dict
+
+    def filter_dictionary(dictionary):
+        pair_filtered_dict = {expiry: [strike for strike in strikes if check_strike(expiry, strike)]
+                              for expiry, strikes in dictionary.items()}
+        return {key: values for key, values in pair_filtered_dict.items() if values}
+
+    def check_strike(expiry, stk):
+        try:
+            return get_straddle_symbol_tokens(name, stk, expiry)
+        except IndexError:
+            print(f'No straddle available for {name} {expiry} {stk}')
+            return False
+
+    return filter_dictionary(sorted_dict)
 
 
 # LTP function
@@ -395,7 +439,19 @@ def straddle_iv(callprice, putprice, spot, strike, timeleft):
     if call_iv is not None and put_iv is not None:
         avg_iv = (call_iv + put_iv) / 2
     else:
-        avg_iv = call_iv if put_iv is not None else call_iv
+        avg_iv = call_iv if put_iv is None else put_iv
+
+    return call_iv, put_iv, avg_iv
+
+
+def strangle_iv(callprice, putprice, spot, callstrike, putstrike, timeleft):
+    call_iv = calculate_iv(callprice, spot, callstrike, timeleft, 'CE')
+    put_iv = calculate_iv(putprice, spot, putstrike, timeleft, 'PE')
+
+    if call_iv is not None and put_iv is not None:
+        avg_iv = (call_iv + put_iv) / 2
+    else:
+        avg_iv = call_iv if put_iv is None else put_iv
 
     return call_iv, put_iv, avg_iv
 
@@ -587,22 +643,14 @@ class PriceFeed(SmartWebSocketV2):
     def start_websocket(self):
 
         def on_open(wsapp):
-            nonlocal websocket_started
-            print("Starting Websocket")
             self.subscribe_tokens()
-            websocket_started = True
 
         # Assign the callbacks.
         self.on_open = on_open
         self.on_data = self.on_data_handler
         self.on_error = lambda wsapp, error: print(error)
         self.on_close = lambda wsapp: print("Close")
-        websocket_started = False
         Thread(target=self.connect).start()
-
-        while not websocket_started:
-            print('Waiting for websocket to start')
-            sleep(1)
 
     def subscribe_tokens(self):
         tokens = ['26000', '26009']
@@ -629,48 +677,48 @@ class PriceFeed(SmartWebSocketV2):
         new_price_dict.update({'FINNIFTY': {'ltp': self.finnifty_index.fetch_ltp()}})
         return new_price_dict
 
-    def add_index_options(self, *indices, range_of_strikes=10, expiries=None, mode=1):
+    def add_options(self, *underlyings, range_of_strikes=10, expiries=None, mode=1):
 
-        def get_option_tokens(strike, expiry):
-            _, c_token = fetch_symbol_token(index.name, expiry, strike, 'CE')
-            _, p_token = fetch_symbol_token(index.name, expiry, strike, 'PE')
+        def get_option_tokens(name, strike, expiry):
+            _, c_token = fetch_symbol_token(name, expiry, strike, 'CE')
+            _, p_token = fetch_symbol_token(name, expiry, strike, 'PE')
             return c_token, p_token
 
-        for index in indices:
+        for underlying in underlyings:
 
             if expiries is None:
-                expiries_list = [index.current_expiry, index.next_expiry, index.month_expiry]
+                expiries_list = [underlying.current_expiry, underlying.next_expiry, underlying.month_expiry]
             elif expiries == 'current':
-                expiries_list = [index.current_expiry]
+                expiries_list = [underlying.current_expiry]
             else:
-                expiries_list = expiries[index.name]
+                expiries_list = expiries[underlying.name]
 
-            ltp = index.fetch_ltp()
+            ltp = underlying.fetch_ltp()
 
             # Creating a OptionChains object for each index
-            self.symbol_option_chains[index.name] = OptionChains()
-            current_strike = findstrike(ltp, index.base)
-            strike_range = np.arange(current_strike - (index.base * (range_of_strikes / 2)),
-                                     current_strike + (index.base * (range_of_strikes / 2)), index.base)
+            self.symbol_option_chains[underlying.name] = OptionChains()
+            current_strike = findstrike(ltp, underlying.base)
+            strike_range = np.arange(current_strike - (underlying.base * (range_of_strikes / 2)),
+                                     current_strike + (underlying.base * (range_of_strikes / 2)), underlying.base)
             strike_range = map(int, strike_range)
             data = []
             call_token_list, put_token_list = [], []
             for strike, expiry in list(itertools.product(strike_range, expiries_list)):
                 try:
-                    call_token, put_token = get_option_tokens(strike, expiry)
+                    call_token, put_token = get_option_tokens(underlying.name, strike, expiry)
                     data.append((call_token, put_token))
                     call_token_list, put_token_list = zip(*data)
                     # Appending the expiry-strike pair to the container in OptionChains object
-                    self.symbol_option_chains[index.name].exp_strike_pairs.append((expiry, strike))
+                    self.symbol_option_chains[underlying.name].exp_strike_pairs.append((expiry, strike))
                 except Exception as e:
-                    logger1.error(f'Error in fetching tokens for {strike, expiry} for {index.name}: {e}')
-                    print(f'Error in fetching tokens for {strike, expiry} for {index.name}: {e}')
+                    logger1.error(f'Error in fetching tokens for {strike, expiry} for {underlying.name}: {e}')
+                    print(f'Error in fetching tokens for {strike, expiry} for {underlying.name}: {e}')
                     call_token_list, put_token_list = ['abc'], ['abc']
                     continue
             token_list = [{'exchangeType': 2,
                            'tokens': list(call_token_list) + list(put_token_list)}]
             self.subscribe(self.correlation_id, mode, token_list)
-            self.index_option_chains_subscribed.append(index.name)
+            self.index_option_chains_subscribed.append(underlying.name)
         sleep(3)
 
     def update_option_chain(self, sleep_time=5, exit_time=(15, 30), process_iv_log=True, market_depth=True,
@@ -893,6 +941,14 @@ class Strangle:
         return fetchltp('NFO', self.call_symbol, self.call_token), \
             fetchltp('NFO', self.put_symbol, self.put_token)
 
+    def underlying_ltp(self):
+        symbol, token = fetch_symbol_token(self.underlying)
+        return fetchltp('NSE', symbol, token)
+
+    def iv(self):
+        return strangle_iv(*self.fetch_ltp(), self.underlying_ltp(), self.call_strike, self.put_strike,
+                           timeleft=timetoexpiry(self.expiry))
+
     def fetch_total_ltp(self):
         call_ltp, put_ltp = fetchltp('NFO', self.call_symbol, self.call_token), \
             fetchltp('NFO', self.put_symbol, self.put_token)
@@ -956,10 +1012,11 @@ class SyntheticArbSystem:
                 last_print_time = currenttime()
 
             if max_price - min_price > threshold:
-                print(f'**********Trade Identified at on strike: Min {strikes[min_price_index]} '
+                print(f'**********Trade Identified at {currenttime()} on strike: Min {strikes[min_price_index]} '
                       f'and Max {strikes[max_price_index]}**********\n'
-                      f'Price difference: {max_price - min_price}\n'
-                      f'Expected Profit: {(max_price - min_price) * qty}\n')
+                      f'Minimum price: {min_price} at strike: {strikes[min_price_index]} Call Ask: {call_asks[min_price_index]} Put Bid: {put_bids[min_price_index]}\n'
+                      f'Maximum price: {max_price} at strike: {strikes[max_price_index]} Call Bid: {call_bids[max_price_index]} Put Ask: {put_asks[max_price_index]}\n'
+                      f'Price difference: {max_price - min_price}\nExpected Profit: {(max_price - min_price) * qty}\n')
                 min_strike = strikes[min_price_index]
                 max_strike = strikes[max_price_index]
                 min_strike_call_ask = call_asks[min_price_index]
@@ -1020,7 +1077,7 @@ class SyntheticArbSystem:
             self.unsuccessful_trades += 1
         elif all(statuses == 'complete'):
             self.successful_trades += 1
-            logger1.info(f'Order executed for {index} {expiry} {qty} Buy {buy_strike} Sell {sell_strike}')
+            logger2.info(f'Order executed for {index} {expiry} {qty} Buy {buy_strike} Sell {sell_strike}')
         elif any(statuses == 'rejected'):
             logger1.error(f'Order rejected for {index} {expiry} {qty} Buy {buy_strike} Sell {sell_strike}')
 
@@ -1029,6 +1086,14 @@ class Index:
     """Initialize an index with the name of the index in uppercase"""
 
     def __init__(self, name, webhook_url=None, websocket=None, spot_future_rate=0.06):
+
+        if name not in symbol_df['SYMBOL'].values:
+            closest_match, confidence = process.extractOne(name, symbol_df['SYMBOL'].values)
+            if confidence > 80:
+                raise Exception(f'Index {name} not found. Did you mean {closest_match}?')
+
+            else:
+                raise ValueError(f'Index {name} not found')
 
         self.name = name
         self.ltp = None
@@ -1040,12 +1105,12 @@ class Index:
         self.order_log = defaultdict(list)
         self.webhook_url = webhook_url
         self.spot_future_rate = spot_future_rate
-
-        self.symbol, self.token = fetch_symbol_token(name)
-        self.lot_size = fetch_lot_size(name)
-        self.fetch_expirys()
+        self.symbol, self.token = fetch_symbol_token(self.name)
+        self.lot_size = fetch_lot_size(self.name)
+        self.fetch_expirys(self.symbol)
         self.freeze_qty = self.fetch_freeze_limit()
-
+        self.available_strikes = get_available_strikes_for_each_expiry(self.name)
+        self.available_strikes_straddle = get_available_strikes_for_each_expiry(self.name, both_pairs=True)
         self.intraday_straddle_forced_exit = False
 
         if self.name == 'BANKNIFTY':
@@ -1057,9 +1122,11 @@ class Index:
         elif self.name == 'FINNIFTY':
             self.base = 50
             self.exchange_type = 2
-
         else:
-            raise ValueError('Index name not valid')
+            self.base = get_base(self.name)
+            self.exchange_type = 1
+            logger2.info(f'Base for {self.name} is {self.base}')
+            print(f'Base for {self.name} is {self.base}')
 
         if websocket:
             try:
@@ -1069,6 +1136,11 @@ class Index:
                 print(f'{self.name}: Subscribed underlying to the websocket')
             except Exception as e:
                 print(f'{self.name}: Websocket subscription failed. {e}')
+
+    def __repr__(self):
+        return f'{self.__class__.__name__}(Name: {self.name}, Lot Size: {self.lot_size}, ' \
+               f'Freeze Qty: {self.freeze_qty}, Current Expiry: {self.current_expiry}, Symbol: {self.symbol}, ' \
+               f'Token: {self.token})'
 
     def fetch_freeze_limit(self):
         try:
@@ -1094,31 +1166,28 @@ class Index:
             freeze_qty_in_lots = 30
             return freeze_qty_in_lots
 
-    def fetch_expirys(self):
-
-        """Fetch Specified Expiry"""
+    def fetch_expirys(self, symbol: str):
 
         expirymask = (scrips.expiry != '') & (scrips.exch_seg == 'NFO') & (scrips.name == self.name)
         expirydates = pd.to_datetime(scrips[expirymask].expiry).astype('datetime64[ns]').sort_values().unique()
-        allexpiries = [(pd.to_datetime(exps) + pd.DateOffset(minutes=930)) for exps in expirydates]
-        allexpiries = [*filter(lambda expiry: expiry > currenttime(), allexpiries)]
-        allexpiries = [*map(lambda expiry: expiry.strftime('%d%b%y').upper(), allexpiries)]
+        allexpiries = [(pd.to_datetime(exps) + pd.DateOffset(minutes=930)).strftime('%d%b%y').upper() for exps in
+                       expirydates if (pd.to_datetime(exps) + pd.DateOffset(minutes=930)) > currenttime()]
+
+        if symbol.endswith('EQ'):
+            self.current_expiry = allexpiries[0]
+            self.next_expiry = allexpiries[1]
+            self.month_expiry = allexpiries[2]
+            self.fut_expiry = allexpiries[0]
+            return
 
         expiry_month_list = [int(datetime.strptime(i[2:5], '%b').strftime('%m')) for i in allexpiries]
-        monthmask = np.array([second - first for first, second in zip(expiry_month_list, expiry_month_list[1:])])
-        monthmask = np.where(monthmask == 0, monthmask, 1)
-
+        monthmask = np.where(np.diff(expiry_month_list) == 0, 0, 1)
         monthexpiries = [b for a, b in zip(monthmask, allexpiries) if a == 1]
 
         currentexpiry = allexpiries[0]
         nextexpiry = allexpiries[1]
-
-        if monthexpiries[0] == allexpiries[0]:
-            monthexpiry = monthexpiries[1]
-            futexpiry = allexpiries[0]
-        else:
-            monthexpiry = monthexpiries[0]
-            futexpiry = monthexpiries[0]
+        monthexpiry = monthexpiries[1] if monthexpiries[0] == allexpiries[0] else monthexpiries[0]
+        futexpiry = allexpiries[0] if monthexpiries[0] == allexpiries[0] else monthexpiries[0]
 
         self.current_expiry = currentexpiry
         self.next_expiry = nextexpiry
@@ -2175,15 +2244,21 @@ class Index:
             raise AssertionError('Delta positions are not balanced.')
 
 
-@log_errors
-def check_logger():
-    print('check_logger')
+class Stock(Index):
+    def __init__(self, name, webhook_url=None, websocket=None, spot_future_difference=0.06):
+        super().__init__(name, webhook_url, websocket, spot_future_difference)
 
-    @log_errors
-    def inner():
-        print('inner')
-        print(90 / 0)
 
-    t = Thread(target=inner)
-    t.start()
-    print(8 / 0)
+def indices_to_trade(nifty: Index, bnf: Index, finnifty: Index, multi=False):
+    fin_exp_closer = timetoexpiry(finnifty.current_expiry, effective_time=True, in_days=True) < timetoexpiry(
+        nifty.current_expiry, effective_time=True, in_days=True)
+    expiry = datetime.strptime(finnifty.current_expiry, '%d%b%y')
+    expiry = (expiry + pd.DateOffset(minutes=930))
+    date_range = pd.date_range(currenttime().date(), expiry - timedelta(days=1))
+    weekend_in_range = date_range.weekday.isin([5, 6]).any()
+    if fin_exp_closer:
+        if weekend_in_range and multi:
+            return [nifty, finnifty]
+        else:
+            return [finnifty]
+    return [nifty, bnf]

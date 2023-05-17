@@ -54,32 +54,17 @@ nifty = atf.Index('NIFTY', webhook_url=discord_webhook_url)
 bnf = atf.Index('BANKNIFTY', webhook_url=discord_webhook_url)
 fin = atf.Index('FINNIFTY', webhook_url=discord_webhook_url, spot_future_rate=0.01)
 
-indices = [fin, bnf, nifty]
-
-less_than_3_days = atf.timetoexpiry(fin.current_expiry, effective_time=True, in_days=True) < 3
-main_expiry = atf.timetoexpiry(nifty.current_expiry, effective_time=True, in_days=True) < 1
+indices = atf.indices_to_trade(nifty, bnf, fin)
+quantity_multiplier = 2 if len(indices) == 1 else 1
+parameters['quantity_in_lots'] = parameters['quantity_in_lots'] * quantity_multiplier
 
 straddle_threads = []
 for index in indices:
-    if index.name == 'FINNIFTY':
-        if not main_expiry and less_than_3_days:
-            # If FINNIFTY is allowed to trade, update the quantity
-            parameters['quantity_in_lots'] = parameters['quantity_in_lots'] * 2
-        else:
-            atf.notifier(f'Skipping {index.name} straddle.', discord_webhook_url)
-            index.traded = False
-            continue
-    else:
-        # If FINNIFTY is allowed to trade, skip other indices
-        if not main_expiry and less_than_3_days:
-            atf.notifier(f'Skipping {index.name} straddle.', discord_webhook_url)
-            index.traded = False
-            continue
-
+    atf.notifier(f'Trading {index.name} straddle.', discord_webhook_url)
+    index.traded = False
     thread = threading.Thread(target=index.intraday_straddle,
                               kwargs=parameters)
     straddle_threads.append(thread)
-    index.traded = True
 
 # Start the discord bot
 if discord_bot_token:
@@ -106,5 +91,4 @@ update_data_thread.join()
 
 # Call the data appender function on the traded indices
 for index in indices:
-    if index.traded:
-        atf.append_data_to_json(index.order_log, f'{user}_{index.name}_straddle_log.json')
+    atf.append_data_to_json(index.order_log, f'{user}_{index.name}_straddle_log.json')

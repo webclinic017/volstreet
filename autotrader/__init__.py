@@ -26,5 +26,22 @@ def fetch_holidays():
     return holidays
 
 
+def get_symbols():
+    try:
+        freeze_qty_url = 'https://archives.nseindia.com/content/fo/qtyfreeze.xls'
+        response = requests.get(freeze_qty_url, timeout=10)  # Set the timeout value
+        response.raise_for_status()  # Raise an exception if the response contains an HTTP error status
+        df = pd.read_excel(response.content)
+        df.columns = df.columns.str.strip()
+        df['SYMBOL'] = df['SYMBOL'].str.strip()
+    except Exception as e:
+        print(f'Error in fetching qtyfreeze.xls: {e}')
+        df = pd.read_csv('autotrader/qtyfreeze.csv')
+        df.columns = df.columns.str.strip()
+        df['SYMBOL'] = df['SYMBOL'].str.strip()
+    return df
+
+
 scrips = get_ticker_file()
 holidays = fetch_holidays()
+symbol_df = get_symbols()

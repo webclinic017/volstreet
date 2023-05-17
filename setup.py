@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 setup(
     name="autotrading",
-    version="0.6.7",
+    version="0.6.8",
     packages=find_packages(),
     install_requires=[
         "asttokens==2.2.1",
@@ -13,6 +13,7 @@ setup(
         "discord.py>=2.2.2",
         "entrypoints==0.4",
         "executing==1.2.0",
+        "fuzzywuzzy==0.18.0",
         "idna==3.4",
         "jedi==0.18.2",
         "lxml==4.9.2",
@@ -30,6 +31,7 @@ setup(
         "Pygments==2.14.0",
         "pyotp==2.8.0",
         "python-dateutil==2.8.2",
+        "python-Levenshtein==0.21.0",
         "pytz==2022.7.1",
         "pywin32==305",
         "pyzmq==25.0.0",
