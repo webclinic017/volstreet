@@ -1,5 +1,5 @@
 from autotrader.discord_bot import run_bot
-from autotrader.strategies import run_daily_index_straddles
+from autotrader.strategies import run_index_straddles
 from multiprocessing import Manager, Pool
 import threading
 
@@ -41,7 +41,7 @@ client_dict = {'abc': {}, 'xyz': {}}
 with Pool() as p:
     for client in client_dict:
         parameters.update(client_dict[client])
-        results = p.apply_async(run_daily_index_straddles, args=(parameters,),
+        results = p.apply_async(run_index_straddles, args=(parameters,),
                                 kwargs=dict(client=client,
                                             webhook_url=None,
                                             multi_before_weekend=False,
