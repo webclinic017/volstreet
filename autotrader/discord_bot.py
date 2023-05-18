@@ -9,9 +9,10 @@ bot = commands.Bot(command_prefix=prefix, intents=intents)
 
 
 # Add the indices list as an argument to the run_bot function
-def run_bot(token, indices):
+def run_bot(token, indices, user_id_map=None):
     # Set the indices attribute on the bot object
     bot.indices = indices
+    bot.user_id_map = user_id_map
     bot.run(token)
 
 

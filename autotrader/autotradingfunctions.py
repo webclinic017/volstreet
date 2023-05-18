@@ -171,8 +171,6 @@ def lookup_and_return(book, field_to_lookup, value_to_lookup, field_to_return):
 
         if len(bucket) == 0:
             return 0
-        elif not isinstance(value_to_lookup, list) and len(bucket) == 1:
-            return bucket[0]
         else:
             return np.array(bucket)
 
@@ -404,7 +402,7 @@ def get_available_strikes_for_each_expiry(name, both_pairs=False):
         try:
             return get_straddle_symbol_tokens(name, stk, expiry)
         except IndexError:
-            print(f"No straddle available for {name} {expiry} {stk}")
+            # print(f"No straddle available for {name} {expiry} {stk}")
             return False
 
     return filter_dictionary(sorted_dict)
@@ -481,6 +479,22 @@ def fetch_strangle_price(
 # Finding ATM strike
 def findstrike(x, base):
     return base * round(x / base)
+
+
+def indices_to_trade(nifty, bnf, finnifty, multi_before_weekend=False):
+    fin_exp_closer = timetoexpiry(
+        finnifty.current_expiry, effective_time=True, in_days=True
+    ) < timetoexpiry(nifty.current_expiry, effective_time=True, in_days=True)
+    expiry = datetime.strptime(finnifty.current_expiry, "%d%b%y")
+    expiry = expiry + pd.DateOffset(minutes=930)
+    date_range = pd.date_range(currenttime().date(), expiry - timedelta(days=1))
+    weekend_in_range = date_range.weekday.isin([5, 6]).any()
+    if fin_exp_closer:
+        if weekend_in_range and multi_before_weekend:
+            return [nifty, finnifty]
+        else:
+            return [finnifty]
+    return [nifty, bnf]
 
 
 def timetoexpiry(expiry, effective_time=False, in_days=False):
@@ -2362,7 +2376,7 @@ class Index:
                 )
                 filtered_hedge = hedges[np.where(hedge_profits > profit_threshold)]
                 print(
-                    f"CTB threshold: {profit_threshold}, Hedge working: {hedge_profits}"
+                    f"{self.name} CTB threshold: {profit_threshold}, Hedge working: {hedge_profits}"
                 )
                 if filtered_hedge.size > 0:
                     filtered_hedge = filtered_hedge[0]
@@ -2422,7 +2436,7 @@ class Index:
                             ctb_message = f"Hedged with: {ctb_hedge}\n"
                             ctb_notification_sent = True
                     except Exception as e:
-                        print(f"Error in process_ctc: {e}")
+                        print(f"Error in process_ctb: {e}")
 
                 # Continuously calculate IV
                 call_iv, put_iv, avg_iv = straddle_iv(
@@ -3175,19 +3189,3 @@ class Stock(Index):
         self, name, webhook_url=None, websocket=None, spot_future_difference=0.06
     ):
         super().__init__(name, webhook_url, websocket, spot_future_difference)
-
-
-def indices_to_trade(nifty: Index, bnf: Index, finnifty: Index, multi=False):
-    fin_exp_closer = timetoexpiry(
-        finnifty.current_expiry, effective_time=True, in_days=True
-    ) < timetoexpiry(nifty.current_expiry, effective_time=True, in_days=True)
-    expiry = datetime.strptime(finnifty.current_expiry, "%d%b%y")
-    expiry = expiry + pd.DateOffset(minutes=930)
-    date_range = pd.date_range(currenttime().date(), expiry - timedelta(days=1))
-    weekend_in_range = date_range.weekday.isin([5, 6]).any()
-    if fin_exp_closer:
-        if weekend_in_range and multi:
-            return [nifty, finnifty]
-        else:
-            return [finnifty]
-    return [nifty, bnf]
