@@ -3,7 +3,7 @@ import threading
 from datetime import time
 
 
-def run_index_straddles(
+def index_intraday_straddles(
     parameters,
     client=None,
     user=None,
@@ -14,7 +14,6 @@ def run_index_straddles(
     shared_data=True,
     start_time=(9, 16),
     multi_before_weekend=True,
-    user_indices_dict=None,
 ):
     # Checking if either client or user, pin, apikey and authkey are provided
     if client is None and (
@@ -76,11 +75,6 @@ def run_index_straddles(
         thread = threading.Thread(target=index.intraday_straddle, kwargs=parameters)
         straddle_threads.append(thread)
 
-    # If user_dict is provided, the indices will be added to the user_dict
-    if user_indices_dict is not None:
-        print(f"Adding indices to {user} in user_indices_dict")
-        user_indices_dict[user] = indices
-
     # Wait for the market to open
     while atf.currenttime().time() < time(*start_time):
         pass
@@ -104,3 +98,6 @@ def run_index_straddles(
         atf.append_data_to_json(
             index.order_log, f"{user}_{index.name}_straddle_log.json"
         )
+
+def stocks_vs_index():
+    pass

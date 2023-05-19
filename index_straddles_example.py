@@ -1,17 +1,11 @@
-from autotrader.discord_bot import run_bot
-from autotrader.strategies import run_index_straddles
-from multiprocessing import Manager, Pool
-import threading
-
-try:
-    discord_bot_token = __import__('os').environ['DISCORD_BOT_TOKEN']
-except KeyError:
-    discord_bot_token = None
+from autotrader.strategies import index_intraday_straddles
+from multiprocessing import Process
+from time import sleep
 
 # Trade inputs
 parameters = dict(
     quantity_in_lots=1,
-    exit_time=(15, 28),
+    exit_time=(15, 29, 30),
     websocket=None,
     shared_data=None,
     wait_for_equality=False,
@@ -28,23 +22,28 @@ parameters = dict(
     convert_to_butterfly=True,
 )
 
-user_indices_dict = None
+client_dict = {
+    'abc': {},
+    'xyz': {
+        'quantity_in_lots': 1,
+        'catch_trend': False
+    }
+}
 
-# Start the discord bot
-if discord_bot_token:
-    user_indices_dict = Manager.dict()
-    discord_bot_thread = threading.Thread(target=run_bot, args=(discord_bot_token, user_indices_dict))
-    discord_bot_thread.daemon = True
-    discord_bot_thread.start()
 
-client_dict = {'abc': {}, 'xyz': {}}
-with Pool() as p:
+def start_strategy(user, params):
+    print('Starting strategy for client:', client)
+    process = Process(target=index_intraday_straddles,
+                      kwargs=dict(parameters=params,
+                                  client=user,
+                                  multi_before_weekend=False))
+    process.start()
+
+
+if __name__ == '__main__':
+
+    sleep(5)
     for client in client_dict:
-        parameters.update(client_dict[client])
-        results = p.apply_async(run_index_straddles, args=(parameters,),
-                                kwargs=dict(client=client,
-                                            webhook_url=None,
-                                            multi_before_weekend=False,
-                                            user_indices_dict=user_indices_dict))
-    p.close()
-    p.join()
+        client_parameters = parameters.copy()
+        client_parameters.update(client_dict[client])
+        start_strategy(client, client_parameters)

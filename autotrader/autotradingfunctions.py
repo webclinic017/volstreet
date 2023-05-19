@@ -364,7 +364,7 @@ def get_straddle_symbol_tokens(name, strike, expiry):
     return c_symbol, c_token, p_symbol, p_token
 
 
-def get_available_strikes_for_each_expiry(name, both_pairs=False):
+def get_available_strikes(name, both_pairs=False):
     mask = (
         (scrips.name == name)
         & (scrips.exch_seg == "NFO")
@@ -1450,10 +1450,8 @@ class Index:
         self.lot_size = fetch_lot_size(self.name)
         self.fetch_expirys(self.symbol)
         self.freeze_qty = self.fetch_freeze_limit()
-        self.available_strikes = get_available_strikes_for_each_expiry(self.name)
-        self.available_strikes_straddle = get_available_strikes_for_each_expiry(
-            self.name, both_pairs=True
-        )
+        self.available_strikes = None
+        self.available_straddle_strikes = None
         self.intraday_straddle_forced_exit = False
 
         if self.name == "BANKNIFTY":
@@ -1583,6 +1581,14 @@ class Index:
     def fetch_previous_close(self):
         self.previous_close = fetchpreviousclose("NSE", self.symbol, self.token)
         return self.previous_close
+
+    def get_available_strikes(self, both_pairs=False):
+        available_strikes = get_available_strikes(self.name, both_pairs)
+        if not both_pairs:
+            self.available_strikes = available_strikes
+        else:
+            self.available_straddle_strikes = available_strikes
+        return available_strikes
 
     def log_order(self, strike, expiry, buy_or_sell, call_price, put_price, order_tag):
         dict_format = {
@@ -2321,6 +2327,15 @@ class Index:
         summary_message += f"\nTraded IV: {summary_iv * 100:0.2f}"
         notifier(summary_message, self.webhook_url)
         sleep(1)
+
+        def write_force_exit_status_to_file(user):
+            with open(f'{user}_force_exit.json', "w") as file:
+                json.dump(False, file)
+
+        def read_force_exit_status_from_file(user):
+            with open(f'{user}_force_exit.json', "r") as file:
+                status = json.load(file)
+                return status
 
         @log_errors
         def price_tracker():
