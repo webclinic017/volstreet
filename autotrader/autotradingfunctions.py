@@ -1170,6 +1170,7 @@ class Strangle:
         self.call_strike = self.call_option.strike
         self.put_strike = self.put_option.strike
         self.underlying = underlying
+        self.underlying_exchange = "NFO" if self.underlying == "FINNIFTY" else "NSE"
         self.expiry = expiry
         self.call_symbol, self.call_token = self.call_option.fetch_symbol_token()
         self.put_symbol, self.put_token = self.put_option.fetch_symbol_token()
@@ -1190,7 +1191,7 @@ class Strangle:
 
     def underlying_ltp(self):
         symbol, token = fetch_symbol_token(self.underlying)
-        return fetchltp("NSE", symbol, token)
+        return fetchltp(self.underlying_exchange, symbol, token)
 
     def iv(self):
         return strangle_iv(
@@ -1467,7 +1468,7 @@ class Index:
             self.base = get_base(self.name)
             self.exchange_type = 1
             logger2.info(f"Base for {self.name} is {self.base}")
-            print(f"Base for {self.name} is {self.base}")
+            # print(f"Base for {self.name} is {self.base}")
 
         if websocket:
             try:
@@ -1581,6 +1582,29 @@ class Index:
     def fetch_previous_close(self):
         self.previous_close = fetchpreviousclose("NSE", self.symbol, self.token)
         return self.previous_close
+
+    def fetch_atm_info(self, fut_expiry=False):
+        expiry = self.fut_expiry if fut_expiry else self.current_expiry
+        price = self.fetch_ltp()
+        atm_strike = findstrike(price, self.base)
+        atm_straddle = Straddle(atm_strike, self.name, expiry)
+        call_price, put_price = atm_straddle.fetch_ltp()
+        total_price = call_price + put_price
+        call_iv, put_iv, avg_iv = atm_straddle.iv()
+        return {'underlying_price': price, 'strike': atm_strike, 'call_price': call_price, 'put_price': put_price, 'total_price': total_price, 'call_iv': call_iv, 'put_iv': put_iv, 'avg_iv': avg_iv}
+
+    def fetch_otm_info(self, strike_offset, fut_expiry=False):
+        expiry = self.fut_expiry if fut_expiry else self.current_expiry
+        price = self.fetch_ltp()
+        call_strike = price*(1+strike_offset)
+        put_strike = price*(1-strike_offset)
+        call_strike = findstrike(call_strike, self.base)
+        put_strike = findstrike(put_strike, self.base)
+        otm_strangle = Strangle(call_strike, put_strike, self.name, expiry)
+        call_price, put_price = otm_strangle.fetch_ltp()
+        total_price = call_price + put_price
+        call_iv, put_iv, avg_iv = otm_strangle.iv()
+        return {'underlying_price': price, 'call_strike': call_strike, 'put_strike': put_strike, 'call_price': call_price, 'put_price': put_price, 'total_price': total_price, 'call_iv': call_iv, 'put_iv': put_iv, 'avg_iv': avg_iv}
 
     def get_available_strikes(self, both_pairs=False):
         available_strikes = get_available_strikes(self.name, both_pairs)
