@@ -1,5 +1,6 @@
 from discord.ext import commands
 import discord
+import json
 
 prefix = "!"
 intents = discord.Intents.default()
@@ -10,7 +11,9 @@ bot = commands.Bot(command_prefix=prefix, intents=intents)
 
 # Add the indices list as an argument to the run_bot function
 def run_bot(token, indices, user_id_map=None):
-    # Set the indices attribute on the bot object
+    # Set the attributes on the bot object
+    if user_id_map is None:
+        user_id_map = {}
     bot.indices = indices
     bot.user_id_map = user_id_map
     bot.run(token)
@@ -34,3 +37,16 @@ async def exit_strats(ctx, *exit_indices):
             await ctx.send(f"Exiting {e_index.name}")
         else:
             await ctx.send(f"Index {index} not found or not traded.")
+
+
+@bot.command(name="exitnew")
+async def exit_strats(ctx, *exit_indices):
+    user_id = str(ctx.message.author.id)
+    client_code = bot.user_id_map.get(user_id, None)
+    if client_code is None:
+        await ctx.send(f"User {user_id} not found")
+        return
+    for index in exit_indices:
+        with open(f'{client_code}_{index}_force_exit.json', "w") as file:
+            json.dump(True, file)
+        await ctx.send(f"Exiting {index}")

@@ -113,7 +113,7 @@ def overnight_straddle_nifty(quantity_in_lots, client=None, user=None, pin=None,
     user, pin, apikey, authkey, discord_webhook_url = get_user_data(client, user, pin, apikey, authkey, webhook_url)
 
     # If today is a holiday, the script will exit
-    if atf.currenttime().date() in atf.holidays or atf.currenttime().weekday() == 4:
+    if atf.currenttime().date() in atf.holidays:
         atf.notifier('Today is either a holiday or Friday. Exiting.', discord_webhook_url)
         exit()
 

@@ -2007,7 +2007,7 @@ class Index:
                 raise Exception("Cannot take avg price before 3pm. Try running the strategy after 3pm")
             notifier("Taking average price of the index over 5m timeframes.", self.webhook_url)
             price_list = []
-            while currenttime().time() < time(15, 26):
+            while currenttime().time() < time(15, 28):
                 nifty_ltp = self.fetch_ltp()
                 price_list.append(nifty_ltp)
                 sleep(60)
@@ -2222,6 +2222,7 @@ class Index:
         take_profit=False,
         take_profit_points=np.inf,
         convert_to_butterfly=False,
+        check_force_exit=False,
     ):
         """Params:
         quantity_in_lots: int
@@ -2370,12 +2371,12 @@ class Index:
         notifier(summary_message, self.webhook_url)
         sleep(1)
 
-        def write_force_exit_status_to_file(user):
-            with open(f'{user}_force_exit.json', "w") as file:
+        def write_force_exit_status(user):
+            with open(f'{user}_{self.name}_force_exit.json', "w") as file:
                 json.dump(False, file)
 
-        def read_force_exit_status_from_file(user):
-            with open(f'{user}_force_exit.json', "r") as file:
+        def read_force_exit_status(user):
+            with open(f'{user}_{self.name}_force_exit.json', "r") as file:
                 status = json.load(file)
                 return status
 
@@ -2383,7 +2384,7 @@ class Index:
         def price_tracker():
             nonlocal call_price, put_price, underlying_price, call_avg_price, put_avg_price, call_exit_price
             nonlocal put_exit_price, mtm_price, profit_in_pts, call_iv, put_iv, avg_iv
-            nonlocal sl_hit_dict, take_profit_exit, ctb_trg, ctb_hedge
+            nonlocal sl_hit_dict, take_profit_exit, ctb_trg, ctb_hedge, force_exit
 
             # Print settings
             last_print_time = currenttime()
@@ -2533,11 +2534,16 @@ class Index:
                             notifier(
                                 f"{self.name} smart exit triggered\n"
                                 f"Time: {currenttime().time()}\n"
-                                f"Average delta: {average_delta}\n",
+                                f"Average delta: {average_delta}\n"
+                                f"Incremental gains: {incremental_gains}\n",
                                 self.webhook_url,
                             )
                             smart_exit_notification_sent = True
                             smart_exit_trg = True
+
+                # Check for force exit
+                if check_force_exit:
+                    force_exit = read_force_exit_status(obj.userId)
 
                 stoploss_message = ""
                 if callsl:
@@ -2849,6 +2855,7 @@ class Index:
                 sl_dict[other_sl_type],
                 self.intraday_straddle_forced_exit,
                 take_profit_exit,
+                force_exit,
             ):
                 sl_dict[other_sl_type], other_sl_orders_complete = check_sl_orders(
                     other_stoploss_order_ids, other_sl_type, refresh=refresh
@@ -2921,6 +2928,11 @@ class Index:
         ctb_trg = False
         ctb_hedge = None
 
+        # Writing force exit status
+        force_exit = False
+        if check_force_exit:
+            write_force_exit_status(obj.userId)
+
         # Price information
         call_exit_price = 0
         put_exit_price = 0
@@ -2961,6 +2973,7 @@ class Index:
             self.intraday_straddle_forced_exit,
             take_profit_exit,
             ctb_trg,
+            force_exit,
         ):
             try:
                 sl_hit_dict["call"], call_sl_orders_complete = check_sl_orders(
