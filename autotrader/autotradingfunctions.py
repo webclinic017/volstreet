@@ -481,14 +481,18 @@ def findstrike(x, base):
     return base * round(x / base)
 
 
+def check_for_weekend(expiry):
+    expiry = datetime.strptime(expiry, "%d%b%y")
+    expiry = expiry + pd.DateOffset(minutes=930)
+    date_range = pd.date_range(currenttime().date(), expiry - timedelta(days=1))
+    return date_range.weekday.isin([5, 6]).any()
+
+
 def indices_to_trade(nifty, bnf, finnifty, multi_before_weekend=False):
     fin_exp_closer = timetoexpiry(
         finnifty.current_expiry, effective_time=True, in_days=True
     ) < timetoexpiry(nifty.current_expiry, effective_time=True, in_days=True)
-    expiry = datetime.strptime(finnifty.current_expiry, "%d%b%y")
-    expiry = expiry + pd.DateOffset(minutes=930)
-    date_range = pd.date_range(currenttime().date(), expiry - timedelta(days=1))
-    weekend_in_range = date_range.weekday.isin([5, 6]).any()
+    weekend_in_range = check_for_weekend(finnifty.current_expiry)
     if fin_exp_closer:
         if weekend_in_range and multi_before_weekend:
             return [nifty, finnifty]
@@ -1965,13 +1969,14 @@ class Index:
 
     @log_errors
     def rollover_overnight_short_straddle(
-        self, quantity_in_lots, strike_offset=1, iv_threshold=0.8
+        self, quantity_in_lots, strike_offset=1, iv_threshold=0.95, take_avg_price=False
     ):
         """Rollover overnight short straddle to the next expiry.
         Args:
             quantity_in_lots (int): Quantity of the straddle in lots.
             strike_offset (float): Strike offset from the current strike.
             iv_threshold (float): IV threshold compared to vix.
+            take_avg_price (bool): Take average price of the index over 5m timeframes.
         """
 
         def load_data():
@@ -1995,16 +2000,30 @@ class Index:
             with open("positions.json", "w") as f:
                 json.dump(data, f)
 
+        avg_ltp = None
+        if take_avg_price:
+            if currenttime().time() < time(15, 00):
+                notifier("Cannot take avg price before 3pm. Try running the strategy after 3pm", self.webhook_url)
+                raise Exception("Cannot take avg price before 3pm. Try running the strategy after 3pm")
+            notifier("Taking average price of the index over 5m timeframes.", self.webhook_url)
+            price_list = []
+            while currenttime().time() < time(15, 26):
+                nifty_ltp = self.fetch_ltp()
+                price_list.append(nifty_ltp)
+                sleep(60)
+            avg_ltp = np.mean(price_list)
+
         vix = yf.Ticker("^INDIAVIX")
-        sleep(120)
         vix = vix.fast_info["last_price"]
 
         order_tag = "Overnight Short Straddle"
 
+        weekend_in_expiry = check_for_weekend(self.current_expiry)
+
         if (
             timetoexpiry(self.current_expiry, effective_time=True, in_days=True) > 4
-        ):  # far from expiry
-            ltp = self.fetch_ltp()
+        ) or weekend_in_expiry:  # far from expiry
+            ltp = avg_ltp if avg_ltp else self.fetch_ltp()
             sell_strike = findstrike(ltp * strike_offset, self.base)
             call_ltp, put_ltp = fetch_straddle_price(
                 self.name, self.current_expiry, sell_strike
@@ -2022,13 +2041,12 @@ class Index:
                 notifier(
                     f"IV is fine compared to VIX: IV {iv}, Vix {vix}.", self.webhook_url
                 )
-                return
         elif (
             timetoexpiry(self.current_expiry, effective_time=True, in_days=True) < 2
         ):  # only exit
             sell_strike = None
         else:
-            ltp = self.fetch_ltp()
+            ltp = avg_ltp if avg_ltp else self.fetch_ltp()
             sell_strike = findstrike(ltp * strike_offset, self.base)
 
         trade_data = load_data()

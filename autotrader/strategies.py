@@ -4,18 +4,8 @@ from datetime import time
 import pandas as pd
 
 
-def index_intraday_straddles(
-        parameters,
-        client=None,
-        user=None,
-        pin=None,
-        apikey=None,
-        authkey=None,
-        webhook_url=None,
-        shared_data=True,
-        start_time=(9, 16),
-        multi_before_weekend=True,
-):
+def get_user_data(client, user, pin, apikey, authkey, webhook_url):
+
     # Checking if either client or user, pin, apikey and authkey are provided
     if client is None and (
             user is None or pin is None or apikey is None or authkey is None
@@ -37,7 +27,23 @@ def index_intraday_straddles(
             except KeyError:
                 webhook_url = None
 
-    discord_webhook_url = webhook_url
+    return user, pin, apikey, authkey, webhook_url
+
+
+def index_intraday_straddles(
+        parameters,
+        client=None,
+        user=None,
+        pin=None,
+        apikey=None,
+        authkey=None,
+        webhook_url=None,
+        shared_data=True,
+        start_time=(9, 16),
+        multi_before_weekend=True,
+):
+
+    user, pin, apikey, authkey, discord_webhook_url = get_user_data(client, user, pin, apikey, authkey, webhook_url)
 
     # Setting the shared data
     if shared_data:
@@ -99,6 +105,32 @@ def index_intraday_straddles(
         atf.append_data_to_json(
             index.order_log, f"{user}_{index.name}_straddle_log.json"
         )
+
+
+def overnight_straddle_nifty(quantity_in_lots, client=None, user=None, pin=None, apikey=None, authkey=None,
+                             webhook_url=None):
+
+    user, pin, apikey, authkey, discord_webhook_url = get_user_data(client, user, pin, apikey, authkey, webhook_url)
+
+    # If today is a holiday, the script will exit
+    if atf.currenttime().date() in atf.holidays or atf.currenttime().weekday() == 4:
+        atf.notifier('Today is either a holiday or Friday. Exiting.', discord_webhook_url)
+        exit()
+
+    atf.login(user=user, pin=pin, apikey=apikey, authkey=authkey, webhook_url=discord_webhook_url)
+    nifty = atf.Index('NIFTY', webhook_url=discord_webhook_url)
+
+    # Rolling over the short straddle
+    nifty.rollover_overnight_short_straddle(quantity_in_lots, strike_offset=1.003, take_avg_price=True)
+
+    # Buying next week's hedge if it is expiry day
+    if atf.timetoexpiry(nifty.current_expiry, in_days=True) < 1:
+        nifty.buy_weekly_hedge(quantity_in_lots, 'strangle', call_offset=.997, put_offset=0.98)
+
+    try:
+        atf.append_data_to_json(nifty.order_log, f'{user}_NIFTY_ON_straddle_log.json')
+    except Exception as e:
+        atf.notifier(f'Appending data failed: {e}', discord_webhook_url)
 
 
 def index_vs_constituents(
