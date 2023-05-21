@@ -21,9 +21,6 @@ import itertools
 global login_data, obj
 
 large_order_threshold = 10
-scrips["expiry_dt"] = pd.to_datetime(
-    scrips[scrips.expiry != ""]["expiry"], format="%d%b%Y"
-)
 
 
 def create_logger(name, level, log_file_prefix):
@@ -38,13 +35,6 @@ def create_logger(name, level, log_file_prefix):
     return logger
 
 
-# Create and configure the error logger
-logger1 = create_logger("logger1", logging.ERROR, "errors")
-
-# Create and configure the second logger
-logger2 = create_logger("logger2", logging.INFO, "info")
-
-
 def log_errors(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -57,682 +47,11 @@ def log_errors(func):
     return wrapper
 
 
-def convert_to_serializable(data):
-    if isinstance(data, dict):
-        return {k: convert_to_serializable(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [convert_to_serializable(item) for item in data]
-    elif hasattr(data, "tolist"):  # Check for numpy arrays
-        return data.tolist()
-    elif hasattr(data, "item"):  # Check for numpy scalar types, e.g., numpy.int32
-        return data.item()
-    else:
-        return data
-
-
-def append_data_to_json(data_dict: defaultdict, file_name: str):
-    # Attempt to read the existing data from the JSON file
-    try:
-        with open(file_name, "r") as file:
-            data = json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError):
-        # If the file doesn't exist or has invalid JSON content, create an empty list and write it to the file
-        data = []
-        with open(file_name, "w") as file:
-            json.dump(data, file)
-
-    # Convert the defaultdict to a regular dict, make it JSON serializable, and append it to the list
-    serializable_data = convert_to_serializable(dict(data_dict))
-    data.append(serializable_data)
-
-    # Write the updated data back to the JSON file with indentation
-    with open(file_name, "w") as file:
-        json.dump(data, file, indent=4, default=str)
-
-
-def login(user, pin, apikey, authkey, webhook_url=None):
-    global obj, login_data
-    authkey = pyotp.TOTP(authkey)
-    obj = SmartConnect(api_key=apikey)
-    login_data = obj.generateSession(user, pin, authkey.now())
-    if login_data["message"] != "SUCCESS":
-        for attempt in range(2, 7):
-            sleep(10)
-            notifier(f"Login attempt {attempt}.", webhook_url)
-            login_data = obj.generateSession(user, pin, authkey.now())
-            if login_data["message"] == "SUCCESS":
-                break
-            if attempt == 6:
-                notifier("Login failed.", webhook_url)
-                raise Exception("Login failed.")
-    notifier(
-        f'Date: {currenttime().strftime("%d %b %Y %H:%M:%S")}\nLogged in successfully.',
-        webhook_url,
-    )
-
-
-def parse_symbol(symbol):
-    match = re.match(r"([A-Za-z]+)(\d{2}[A-Za-z]{3}\d{2})(\d+)(\w+)", symbol)
-    if match:
-        return match.groups()
-    return None
-
-
-def fetch_book(book):
-    def fetch_data(fetch_func, description, max_attempts=6, sleep_duration=2):
-        for attempt in range(1, max_attempts + 1):
-            try:
-                data = fetch_func()["data"]
-                return data
-            except DataException:
-                if attempt == max_attempts:
-                    raise Exception(
-                        f"Failed to fetch {description} due to DataException."
-                    )
-                else:
-                    sleep(sleep_duration)
-            except Exception as e:
-                if attempt == max_attempts:
-                    raise Exception(f"Failed to fetch {description}: {e}")
-                else:
-                    print(f"Error {attempt} in fetching {description}: {e}")
-                    sleep(sleep_duration)
-
-    if book == "orderbook":
-        return fetch_data(obj.orderBook, "orderbook")
-    elif book in {"positions", "position"}:
-        return fetch_data(obj.position, "positions")
-    else:
-        raise ValueError(f"Invalid book type '{book}'.")
-
-
-def lookup_and_return(book, field_to_lookup, value_to_lookup, field_to_return):
-    def filter_and_return(data: list):
-        if not isinstance(field_to_lookup, list):
-            field_to_lookup_ = [field_to_lookup]
-            value_to_lookup_ = [value_to_lookup]
-        else:
-            field_to_lookup_ = field_to_lookup
-            value_to_lookup_ = value_to_lookup
-
-        bucket = [
-            entry[field_to_return]
-            for entry in data
-            if all(
-                (
-                    entry[field] == value
-                    if not isinstance(value, list)
-                    else entry[field] in value
-                )
-                for field, value in zip(field_to_lookup_, value_to_lookup_)
-            )
-            and all(entry[field] != "" for field in field_to_lookup_)
-        ]
-
-        if len(bucket) == 0:
-            return 0
-        else:
-            return np.array(bucket)
-
-    if not (
-        isinstance(field_to_lookup, (str, list))
-        and isinstance(value_to_lookup, (str, list))
-    ):
-        raise ValueError(
-            "Both 'field_to_lookup' and 'value_to_lookup' must be strings or lists."
-        )
-
-    if isinstance(field_to_lookup, list) and isinstance(value_to_lookup, str):
-        raise ValueError(
-            "Unsupported input: 'field_to_lookup' is a list and 'value_to_lookup' is a string."
-        )
-
-    if isinstance(book, list):
-        return filter_and_return(book)
-    elif isinstance(book, str) and book in {"orderbook", "positions"}:
-        book_data = fetch_book(book)
-        return filter_and_return(book_data)
-    else:
-        raise ValueError("Invalid input")
-
-
-# Discord messenger
-def notifier(message, webhook_url=None):
-    if webhook_url is None:
-        print(message)
-        return
-    else:
-        notification_url = webhook_url
-        data = {"content": message}
-        requests.post(
-            notification_url,
-            data=json.dumps(data),
-            headers={"Content-Type": "application/json"},
-        )
-        print(message)
-    return
-
-
-# Market Hours
-def markethours():
-    if time(9, 10) < currenttime().time() < time(15, 30):
-        return True
-    else:
-        return False
-
-
-# Defining current time
-def currenttime():
-    # Adjusting for timezones
-    ist = timezone(timedelta(hours=5, minutes=30))
-    return datetime.now(ist).replace(tzinfo=None)
-
-
-def simulate_option_movement(
-    spot,
-    strike,
-    time_to_expiry,
-    flag,
-    simulated_move=0.2,
-    r=0.06,
-    vol=None,
-    price=None,
-    print_results=False,
-):
-    if price is None and vol is None:
-        raise ValueError("Either price or vol must be specified.")
-    flag = flag.lower()[0]
-    price_func = bs.put if flag.upper().startswith("P") else bs.call
-    simulated_move = simulated_move / 100
-    simulated_spot = (
-        (spot * (1 + simulated_move)) if flag == "p" else (spot * (1 - simulated_move))
-    )
-    if vol is None:
-        try:
-            vol = bs.implied_volatility(price, spot, strike, time_to_expiry, r, flag)
-        except ValueError:
-            return None
-    if price is None:
-        price = price_func(spot, strike, time_to_expiry, r, vol)
-    current_delta = bs.delta(spot, strike, time_to_expiry, r, vol, flag)
-    new_delta = bs.delta(simulated_spot, strike, time_to_expiry, r, vol, flag)
-    delta_change = new_delta - current_delta
-    average_delta = abs((new_delta + current_delta) / 2)
-    new_price = price_func(simulated_spot, strike, time_to_expiry, r, vol)
-    price_gain = price - new_price
-
-    if print_results:
-        print(
-            f"Current Delta: {current_delta:.2f}\nNew Delta: {new_delta:.2f}\n"
-            f"Delta Change: {delta_change:.2f}\nAverage Delta: {average_delta:.2f}\n"
-            f"New Price: {new_price:.2f}\nPrice Change: {price_gain:.2f}\n"
-            f"Volatility: {vol:.2f}\nSimulated Spot: {simulated_spot:.2f}\n"
-            f"Simulated Move: {simulated_move * 100:.2f}%\n"
-        )
-
-    return [price_gain, average_delta]
-
-
-def spot_price_from_future(future_price, interest_rate, time_to_future):
-    """
-    Calculate the spot price from the future price, interest rate, and time.
-
-    :param future_price: float, the future price of the asset
-    :param interest_rate: float, the annual interest rate (as a decimal, e.g., 0.05 for 5%)
-    :param time_to_future: float, the time to maturity (in years)
-    :return: float, the spot price of the asset
-    """
-    spot_price = future_price / ((1 + interest_rate) ** time_to_future)
-    return spot_price
-
-
-def fetch_lot_size(name):
-    return int(
-        scrips.loc[(scrips.name == name) & (scrips.exch_seg == "NFO"), "lotsize"].iloc[
-            0
-        ]
-    )
-
-
-def get_base(name):
-    strike_array = scrips.loc[
-        (scrips.name == name) & (scrips.exch_seg == "NFO")
-    ].sort_values("expiry_dt")
-    closest_expiry = strike_array.expiry_dt.iloc[0]
-    strike_array = (
-        strike_array.loc[strike_array.expiry_dt == closest_expiry]["strike"] / 100
-    )
-    strike_differences = np.diff(strike_array.sort_values().unique())
-    values, counts = np.unique(strike_differences, return_counts=True)
-    mode = values[np.argmax(counts)]
-    return mode
-
-
-def fetch_symbol_token(
-    name=None, expiry=None, strike=None, option_type=None, tokens=None
-):
-    """Fetches symbol & token for a given scrip name. Provide just a single world if
-    you want to fetch the symbol & token for the cash segment. If you want to fetch the
-    symbol & token for the options segment, provide name, strike, expiry, option_type.
-    Expiry should be in the DDMMMYY format. Optiontype should be CE or PE. Optionally, provide
-    a list of tokens to fetch the corresponding symbols."""
-
-    if tokens is None and name is None:
-        raise ValueError("Either name or tokens must be specified.")
-
-    if tokens is not None:
-        token_df = scrips.loc[scrips["token"].isin(tokens)]
-        symbol_token_pairs = [
-            (token_df.loc[token_df["token"] == token, "symbol"].values[0], token)
-            for token in tokens
-        ]
-        return symbol_token_pairs
-
-    if expiry is None and strike is None and option_type is None:
-        if name in ["BANKNIFTY", "NIFTY"]:
-            symbol, token = scrips.loc[
-                (scrips.name == name) & (scrips.exch_seg == "NSE"), ["symbol", "token"]
-            ].values[0]
-        elif name == "FINNIFTY":
-            futures = scrips.loc[
-                (scrips.name == name) & (scrips.instrumenttype == "FUTIDX"),
-                ["expiry", "symbol", "token"],
-            ]
-            futures["expiry"] = pd.to_datetime(futures["expiry"], format="%d%b%Y")
-            futures = futures.sort_values(by="expiry")
-            symbol, token = futures.iloc[0][["symbol", "token"]].values
-        else:
-            symbol, token = scrips.loc[
-                (scrips.name == name)
-                & (scrips.exch_seg == "NSE")
-                & (scrips.symbol.str.endswith("EQ")),
-                ["symbol", "token"],
-            ].values[0]
-    elif expiry is not None and strike is not None and option_type is not None:
-        strike = str(int(strike))  # Handle float strikes, convert to integer first
-        symbol = name + expiry + strike + option_type
-        token = scrips[scrips.symbol == symbol]["token"].tolist()[0]
-    else:
-        raise ValueError("Invalid arguments")
-
-    return symbol, token
-
-
-def get_straddle_symbol_tokens(name, strike, expiry):
-    c_symbol, c_token = fetch_symbol_token(name, expiry, strike, "CE")
-    p_symbol, p_token = fetch_symbol_token(name, expiry, strike, "PE")
-    return c_symbol, c_token, p_symbol, p_token
-
-
-def get_available_strikes(name, both_pairs=False):
-    mask = (
-        (scrips.name == name)
-        & (scrips.exch_seg == "NFO")
-        & (scrips.instrumenttype.str.startswith("OPT"))
-    )
-    filtered = scrips.loc[mask].copy()
-    filtered["strike"] = filtered["strike"] / 100
-    filtered_dict = (
-        filtered.groupby("expiry")["strike"]
-        .unique()
-        .apply(list)
-        .apply(sorted)
-        .to_dict()
-    )
-    new_keys = map(
-        lambda x: datetime.strptime(x, "%d%b%Y").strftime("%d%b%y").upper(),
-        filtered_dict.keys(),
-    )
-    filtered_dict = {k: v for k, v in zip(new_keys, filtered_dict.values())}
-    sorted_dict = {
-        k: filtered_dict[k]
-        for k in sorted(filtered_dict, key=lambda x: datetime.strptime(x, "%d%b%y"))
-    }
-    if not both_pairs:
-        return sorted_dict
-
-    def filter_dictionary(dictionary):
-        pair_filtered_dict = {
-            expiry: [strike for strike in strikes if check_strike(expiry, strike)]
-            for expiry, strikes in dictionary.items()
-        }
-        return {key: values for key, values in pair_filtered_dict.items() if values}
-
-    def check_strike(expiry, stk):
-        try:
-            return get_straddle_symbol_tokens(name, stk, expiry)
-        except IndexError:
-            # print(f"No straddle available for {name} {expiry} {stk}")
-            return False
-
-    return filter_dictionary(sorted_dict)
-
-
-# LTP function
-def fetchltp(exchange_seg, symbol, token):
-    for attempt in range(1, 6):
-        try:
-            price = obj.ltpData(exchange_seg, symbol, token)["data"]["ltp"]
-            return price
-        except DataException:
-            if attempt == 5:
-                raise DataException("Failed to fetch LTP due to DataException")
-            else:
-                sleep(1)
-                continue
-        except Exception as e:
-            if attempt == 5:
-                raise Exception(f"Error in fetching LTP: {e}")
-            else:
-                print(f"Error {attempt} in fetching LTP: {e}")
-                sleep(1)
-                continue
-
-
-def fetchpreviousclose(exchange_seg, symbol, token):
-    for attempt in range(3):
-        try:
-            previousclose = obj.ltpData(exchange_seg, symbol, token)["data"]["close"]
-            return previousclose
-        except Exception as e:
-            if attempt == 2:
-                print(f"Error in fetchpreviousclose: {e}")
-            else:
-                print(
-                    f"Error {attempt} in fetchpreviousclose: {e}\nRetrying again in 1 second"
-                )
-                sleep(1)
-
-
-def fetch_straddle_price(name, expiry, strike, return_total_price=False):
-    """Fetches the price of the straddle for a given name, expiry and strike. Expiry should be in the DDMMMYY format.
-    If return_total_price is True, then the total price of the straddle is returned. If return_total_price is False,
-    then the price of the call and put is returned as a tuple."""
-
-    call_symbol, call_token = fetch_symbol_token(name, expiry, strike, "CE")
-    put_symbol, put_token = fetch_symbol_token(name, expiry, strike, "PE")
-    call_ltp = fetchltp("NFO", call_symbol, call_token)
-    put_ltp = fetchltp("NFO", put_symbol, put_token)
-    if return_total_price:
-        return call_ltp + put_ltp
-    else:
-        return call_ltp, put_ltp
-
-
-def fetch_strangle_price(
-    name, expiry, call_strike, put_strike, return_total_price=False
-):
-    """Fetches the price of the strangle for a given name, expiry and strike. Expiry should be in the DDMMMYY format.
-    If return_total_price is True, then the total price of the strangle is returned. If return_total_price is False,
-    then the price of the call and put is returned as a tuple."""
-
-    call_symbol, call_token = fetch_symbol_token(name, expiry, call_strike, "CE")
-    put_symbol, put_token = fetch_symbol_token(name, expiry, put_strike, "PE")
-    call_ltp = fetchltp("NFO", call_symbol, call_token)
-    put_ltp = fetchltp("NFO", put_symbol, put_token)
-    if return_total_price:
-        return call_ltp + put_ltp
-    else:
-        return call_ltp, put_ltp
-
-
-# Finding ATM strike
-def findstrike(x, base):
-    return base * round(x / base)
-
-
-def check_for_weekend(expiry):
-    expiry = datetime.strptime(expiry, "%d%b%y")
-    expiry = expiry + pd.DateOffset(minutes=930)
-    date_range = pd.date_range(currenttime().date(), expiry - timedelta(days=1))
-    return date_range.weekday.isin([5, 6]).any()
-
-
-def indices_to_trade(nifty, bnf, finnifty, multi_before_weekend=False):
-    fin_exp_closer = timetoexpiry(
-        finnifty.current_expiry, effective_time=True, in_days=True
-    ) < timetoexpiry(nifty.current_expiry, effective_time=True, in_days=True)
-    weekend_in_range = check_for_weekend(finnifty.current_expiry)
-    if fin_exp_closer:
-        if weekend_in_range and multi_before_weekend:
-            return [nifty, finnifty]
-        else:
-            return [finnifty]
-    return [nifty, bnf]
-
-
-def timetoexpiry(expiry, effective_time=False, in_days=False):
-    """Return time left to expiry"""
-    if in_days:
-        multiplier = 365
-    else:
-        multiplier = 1
-
-    expiry = datetime.strptime(expiry, "%d%b%y")
-    time_to_expiry = (
-        (expiry + pd.DateOffset(minutes=930)) - currenttime()
-    ) / timedelta(days=365)
-
-    # Subtracting holidays and weekends
-    if effective_time:
-        date_range = pd.date_range(currenttime().date(), expiry - timedelta(days=1))
-        numer_of_weekdays = sum(date_range.dayofweek > 4)
-        number_of_holidays = sum(date_range.isin(holidays))
-        time_to_expiry -= (numer_of_weekdays + number_of_holidays) / 365
-        # print(f'Number of weekdays: {numer_of_weekdays} and number of holidays: {number_of_holidays}')
-    return time_to_expiry * multiplier
-
-
-def calculate_iv(opt_price, spot, strike, tte, opt_type):
-    try:
-        return bs.implied_volatility(opt_price, spot, strike, tte, 0.06, opt_type)
-    except ValueError:
-        return None
-
-
-def straddle_iv(callprice, putprice, spot, strike, timeleft):
-    call_iv = calculate_iv(callprice, spot, strike, timeleft, "CE")
-    put_iv = calculate_iv(putprice, spot, strike, timeleft, "PE")
-
-    if call_iv is not None and put_iv is not None:
-        avg_iv = (call_iv + put_iv) / 2
-    else:
-        avg_iv = call_iv if put_iv is None else put_iv
-
-    return call_iv, put_iv, avg_iv
-
-
-def strangle_iv(callprice, putprice, spot, callstrike, putstrike, timeleft):
-    call_iv = calculate_iv(callprice, spot, callstrike, timeleft, "CE")
-    put_iv = calculate_iv(putprice, spot, putstrike, timeleft, "PE")
-
-    if call_iv is not None and put_iv is not None:
-        avg_iv = (call_iv + put_iv) / 2
-    else:
-        avg_iv = call_iv if put_iv is None else put_iv
-
-    return call_iv, put_iv, avg_iv
-
-
-def calc_greeks(position_string, position_price, underlying_price):
-    """Fetches the price, iv and delta of a stock"""
-
-    name, strike, expiry, option_type = position_string.split()
-    strike = int(strike)
-    time_left = timetoexpiry(expiry)
-
-    iv = (
-        bs.implied_volatility(
-            position_price, underlying_price, strike, time_left, 0.05, option_type
-        )
-        * 100
-    )
-    delta = bs.delta(underlying_price, strike, time_left, 0.05, iv, option_type)
-    gamma = bs.gamma(underlying_price, strike, time_left, 0.05, iv)
-
-    return iv, delta, gamma
-
-
-def charges(buy_premium, contract_size, num_contracts, freeze_quantity=None):
-    if freeze_quantity:
-        number_of_orders = np.ceil(num_contracts / freeze_quantity)
-    else:
-        number_of_orders = 1
-
-    buy_brokerage = 40 * number_of_orders
-    sell_brokerage = 40 * number_of_orders
-    transaction_charge_rate = 0.05 / 100
-    stt_ctt_rate = 0.0625 / 100
-    gst_rate = 18 / 100
-
-    buy_transaction_charges = (
-        buy_premium * contract_size * num_contracts * transaction_charge_rate
-    )
-    sell_transaction_charges = (
-        buy_premium * contract_size * num_contracts * transaction_charge_rate
-    )
-    stt_ctt = buy_premium * contract_size * num_contracts * stt_ctt_rate
-
-    buy_gst = (buy_brokerage + buy_transaction_charges) * gst_rate
-    sell_gst = (sell_brokerage + sell_transaction_charges) * gst_rate
-
-    total_charges = (
-        buy_brokerage
-        + sell_brokerage
-        + buy_transaction_charges
-        + sell_transaction_charges
-        + stt_ctt
-        + buy_gst
-        + sell_gst
-    )
-    charges_per_share = total_charges / (num_contracts * contract_size)
-
-    return round(charges_per_share, 1)
-
-
-# ORDER FUNCTIONS BELOW #
-
-
-def placeorder(symbol, token, qty, buyorsell, orderprice, ordertag=""):
-    """Provide symbol, token, qty (shares), buyorsell, orderprice, ordertag (optional)"""
-
-    if orderprice == "MARKET":
-        params = {
-            "variety": "NORMAL",
-            "tradingsymbol": symbol,
-            "symboltoken": token,
-            "transactiontype": buyorsell,
-            "exchange": "NFO",
-            "ordertype": "MARKET",
-            "producttype": "CARRYFORWARD",
-            "duration": "DAY",
-            "price": 0,
-            "squareoff": "0",
-            "stoploss": "0",
-            "quantity": int(qty),
-            "ordertag": ordertag,
-        }
-
-    else:
-        if buyorsell == "BUY" and orderprice < 1:
-            orderprice = 1
-        elif buyorsell == "SELL" and orderprice < 1:
-            orderprice = 0.05
-
-        params = {
-            "variety": "NORMAL",
-            "tradingsymbol": symbol,
-            "symboltoken": token,
-            "transactiontype": buyorsell,
-            "exchange": "NFO",
-            "ordertype": "LIMIT",
-            "producttype": "CARRYFORWARD",
-            "duration": "DAY",
-            "price": round(orderprice, 1),
-            "squareoff": "0",
-            "stoploss": "0",
-            "quantity": int(qty),
-            "ordertag": ordertag,
-        }
-
-    for attempt in range(1, 4):
-        try:
-            order_id = obj.placeOrder(params)
-            return order_id
-        except KeyboardInterrupt:
-            raise KeyboardInterrupt
-        except Exception as e:
-            if attempt == 3:
-                raise e
-            print(f"Error {attempt} in placing order for {symbol}: {e}")
-            sleep(2)
-            continue
-
-
-def placeSLorder(symbol, token, qty, buyorsell, triggerprice, ordertag=""):
-    executionprice = triggerprice * 1.1
-
-    params = {
-        "variety": "STOPLOSS",
-        "tradingsymbol": symbol,
-        "symboltoken": token,
-        "transactiontype": buyorsell,
-        "exchange": "NFO",
-        "ordertype": "STOPLOSS_LIMIT",
-        "producttype": "CARRYFORWARD",
-        "duration": "DAY",
-        "triggerprice": round(triggerprice, 1),
-        "price": round(executionprice, 1),
-        "squareoff": "0",
-        "stoploss": "0",
-        "quantity": int(qty),
-        "ordertag": ordertag,
-    }
-
-    for attempt in range(1, 4):
-        try:
-            order_id = obj.placeOrder(params)
-            return order_id
-        except KeyboardInterrupt:
-            raise KeyboardInterrupt
-        except Exception as e:
-            if attempt == 3:
-                raise e
-            print(f"Error {attempt} in placing SL order for {symbol}: {e}")
-            sleep(2)
-            continue
-
-
-def place_synthetic_fut_order(
-    name, strike, expiry, buy_or_sell, quantity, prices: str | tuple = "MARKET"
-):
-    """Places a synthetic future order. Quantity is in number of shares."""
-
-    strike = int(strike)
-    call_symbol, call_token = fetch_symbol_token(name, expiry, strike, "CE")
-    put_symbol, put_token = fetch_symbol_token(name, expiry, strike, "PE")
-
-    if prices == "MARKET":
-        call_price = "MARKET"
-        put_price = "MARKET"
-    else:
-        call_price, put_price = prices
-
-    call_action = "BUY" if buy_or_sell == "BUY" else "SELL"
-    put_action = "SELL" if buy_or_sell == "BUY" else "BUY"
-    order_id_call = placeorder(
-        call_symbol, call_token, quantity, call_action, call_price
-    )
-    order_id_put = placeorder(put_symbol, put_token, quantity, put_action, put_price)
-    return order_id_call, order_id_put
-
-
-def cancel_pending_orders(order_ids, variety="STOPLOSS"):
-    if isinstance(order_ids, (list, np.ndarray)):
-        for order_id in order_ids:
-            obj.cancelOrder(order_id, variety)
-    else:
-        obj.cancelOrder(order_ids, variety)
+# Create and configure the error logger
+logger1 = create_logger("logger1", logging.ERROR, "errors")
+
+# Create and configure the second logger
+logger2 = create_logger("logger2", logging.INFO, "info")
 
 
 class OptionChains(defaultdict):
@@ -1595,20 +914,39 @@ class Index:
         call_price, put_price = atm_straddle.fetch_ltp()
         total_price = call_price + put_price
         call_iv, put_iv, avg_iv = atm_straddle.iv()
-        return {'underlying_price': price, 'strike': atm_strike, 'call_price': call_price, 'put_price': put_price, 'total_price': total_price, 'call_iv': call_iv, 'put_iv': put_iv, 'avg_iv': avg_iv}
+        return {
+            "underlying_price": price,
+            "strike": atm_strike,
+            "call_price": call_price,
+            "put_price": put_price,
+            "total_price": total_price,
+            "call_iv": call_iv,
+            "put_iv": put_iv,
+            "avg_iv": avg_iv,
+        }
 
     def fetch_otm_info(self, strike_offset, fut_expiry=False):
         expiry = self.fut_expiry if fut_expiry else self.current_expiry
         price = self.fetch_ltp()
-        call_strike = price*(1+strike_offset)
-        put_strike = price*(1-strike_offset)
+        call_strike = price * (1 + strike_offset)
+        put_strike = price * (1 - strike_offset)
         call_strike = findstrike(call_strike, self.base)
         put_strike = findstrike(put_strike, self.base)
         otm_strangle = Strangle(call_strike, put_strike, self.name, expiry)
         call_price, put_price = otm_strangle.fetch_ltp()
         total_price = call_price + put_price
         call_iv, put_iv, avg_iv = otm_strangle.iv()
-        return {'underlying_price': price, 'call_strike': call_strike, 'put_strike': put_strike, 'call_price': call_price, 'put_price': put_price, 'total_price': total_price, 'call_iv': call_iv, 'put_iv': put_iv, 'avg_iv': avg_iv}
+        return {
+            "underlying_price": price,
+            "call_strike": call_strike,
+            "put_strike": put_strike,
+            "call_price": call_price,
+            "put_price": put_price,
+            "total_price": total_price,
+            "call_iv": call_iv,
+            "put_iv": put_iv,
+            "avg_iv": avg_iv,
+        }
 
     def get_available_strikes(self, both_pairs=False):
         available_strikes = get_available_strikes(self.name, both_pairs)
@@ -1774,59 +1112,102 @@ class Index:
             raise Exception("Order statuses uncertain")
 
     def place_synthetic_fut_order(
-        self, strike, expiry, buy_or_sell, quantity, price="MARKET"
+        self,
+        strike,
+        expiry,
+        buy_or_sell,
+        quantity_in_lots,
+        prices="LIMIT",
+        check_status=True,
     ):
         """Places a synthetic future order. Quantity is in number of shares."""
-
-        freeze_qty_in_shares = self.freeze_qty * self.lot_size
-        if quantity > freeze_qty_in_shares:
-            quotient, remainder = divmod(quantity, freeze_qty_in_shares)
-            if quotient > 10:
-                raise Exception(
-                    "Order too big. This error was raised to prevent accidental large order placement."
-                )
-            if remainder == 0:
-                spliced_orders = [self.freeze_qty] * quotient
-            else:
-                spliced_orders = [self.freeze_qty] * quotient + [remainder]
-        else:
-            spliced_orders = [quantity]
-
-        call_symbol, call_token = fetch_symbol_token(self.name, expiry, strike, "CE")
-        put_symbol, put_token = fetch_symbol_token(self.name, expiry, strike, "PE")
-
-        call_order_id_list = []
-        put_order_id_list = []
-        for quantity in spliced_orders:
+        name = self.name
+        strike = int(strike)
+        expiry = expiry
+        buy_or_sell = buy_or_sell
+        spliced_orders = self.splice_orders(quantity_in_lots)
+        straddle = Straddle(strike, name, expiry)
+        call_symbol, call_token, put_symbol, put_token = straddle.fetch_symbol_token()
+        if prices == "LIMIT":
+            call_price, put_price = straddle.fetch_ltp()
             if buy_or_sell == "BUY":
-                order_id_call = placeorder(
-                    call_symbol, call_token, quantity, "BUY", "MARKET"
+                call_price = call_price * 1.05
+                put_price = put_price * 0.95
+            else:
+                call_price = call_price * 0.95
+                put_price = put_price * 1.05
+        elif prices == "MARKET":
+            call_price = "MARKET"
+            put_price = "MARKET"
+        else:
+            call_price, put_price = prices
+
+        call_action = "BUY" if buy_or_sell == "BUY" else "SELL"
+        put_action = "SELL" if buy_or_sell == "BUY" else "BUY"
+
+        order_ids_call = []
+        order_ids_put = []
+        for quantity in spliced_orders:
+            quantity_in_shares = quantity * self.lot_size
+
+            order_id_call = placeorder(
+                call_symbol, call_token, quantity_in_shares, call_action, call_price
+            )
+            order_id_put = placeorder(
+                put_symbol, put_token, quantity_in_shares, put_action, put_price
+            )
+            if check_status:
+                order_ids_call.append(order_id_call)
+                order_ids_put.append(order_id_put)
+
+        if check_status:
+            orderbook = fetch_book("orderbook")
+
+            call_order_statuses = lookup_and_return(
+                orderbook, "orderid", order_ids_call, "status"
+            )
+            put_order_statuses = lookup_and_return(
+                orderbook, "orderid", order_ids_put, "status"
+            )
+
+            if all(call_order_statuses == "complete") and all(
+                put_order_statuses == "complete"
+            ):
+                logger2.info(
+                    f"Synthetic Order(s) placed successfully for {buy_or_sell} {name} {strike} {expiry} "
+                    f"{quantity_in_lots} lot(s)."
                 )
-                order_id_put = placeorder(
-                    put_symbol, put_token, quantity, "SELL", "MARKET"
+                print(
+                    f"Synthetic Order(s) placed successfully for {buy_or_sell} {name} {strike} {expiry} "
+                    f"{quantity_in_lots} lot(s)."
                 )
-            elif buy_or_sell == "SELL":
-                order_id_call = placeorder(
-                    call_symbol, call_token, quantity, "SELL", "MARKET"
+            elif all(call_order_statuses == "rejected") and all(
+                put_order_statuses == "rejected"
+            ):
+                logger2.info(
+                    f"All synthetic orders rejected for {buy_or_sell} {name} {strike} "
+                    f"{expiry} {quantity_in_lots} lot(s)."
                 )
-                order_id_put = placeorder(
-                    put_symbol, put_token, quantity, "BUY", "MARKET"
+                print(
+                    f"All synthetic orders rejected for {buy_or_sell} {name} {strike} "
+                    f"{expiry} {quantity_in_lots} lot(s)."
+                )
+            elif any(call_order_statuses == "pending") and any(
+                put_order_statuses == "pending"
+            ):
+                logger2.info(
+                    f"Some synthetic orders pending for {buy_or_sell} {name} {strike} "
+                    f"{expiry} {quantity_in_lots} lot(s)."
+                )
+                print(
+                    f"Some synthetic orders pending for {buy_or_sell} {name} {strike} "
+                    f"{expiry} {quantity_in_lots} lot(s)."
                 )
             else:
-                raise Exception("Invalid buy or sell")
-            call_order_id_list.append(order_id_call)
-            put_order_id_list.append(order_id_put)
-
-        order_statuses = lookup_and_return(
-            "orderbook", "orderid", call_order_id_list + put_order_id_list, "status"
-        )
-
-        if not all(order_statuses == "complete"):
-            raise Exception("Syntehtic Futs: Orders not completed")
-        else:
-            print(
-                f"Synthetic Futs: {buy_or_sell} Order for {quantity} quantity completed."
-            )
+                logger1.error(
+                    f"ERROR. Synthetic order statuses uncertain for {buy_or_sell} {name} {strike} "
+                    f"{expiry} {quantity_in_lots} lot(s)."
+                )
 
     def find_equal_strike(
         self, exit_time, websocket, wait_for_equality, target_disparity, expiry=None
@@ -2003,9 +1384,17 @@ class Index:
         avg_ltp = None
         if take_avg_price:
             if currenttime().time() < time(15, 00):
-                notifier("Cannot take avg price before 3pm. Try running the strategy after 3pm", self.webhook_url)
-                raise Exception("Cannot take avg price before 3pm. Try running the strategy after 3pm")
-            notifier("Taking average price of the index over 5m timeframes.", self.webhook_url)
+                notifier(
+                    "Cannot take avg price before 3pm. Try running the strategy after 3pm",
+                    self.webhook_url,
+                )
+                raise Exception(
+                    "Cannot take avg price before 3pm. Try running the strategy after 3pm"
+                )
+            notifier(
+                "Taking average price of the index over 5m timeframes.",
+                self.webhook_url,
+            )
             price_list = []
             while currenttime().time() < time(15, 28):
                 nifty_ltp = self.fetch_ltp()
@@ -2031,6 +1420,7 @@ class Index:
             call_iv, put_iv, iv = straddle_iv(
                 call_ltp, put_ltp, ltp, sell_strike, timetoexpiry(self.current_expiry)
             )
+            iv = iv * 100
             if iv < vix * iv_threshold:
                 notifier(
                     f"IV is too low compared to VIX: IV {iv}, Vix {vix}.",
@@ -2372,11 +1762,11 @@ class Index:
         sleep(1)
 
         def write_force_exit_status(user):
-            with open(f'{user}_{self.name}_force_exit.json', "w") as file:
+            with open(f"{user}_{self.name}_force_exit.json", "w") as file:
                 json.dump(False, file)
 
         def read_force_exit_status(user):
-            with open(f'{user}_{self.name}_force_exit.json', "r") as file:
+            with open(f"{user}_{self.name}_force_exit.json", "r") as file:
                 status = json.load(file)
                 return status
 
@@ -3259,3 +2649,695 @@ class Stock(Index):
         self, name, webhook_url=None, websocket=None, spot_future_difference=0.06
     ):
         super().__init__(name, webhook_url, websocket, spot_future_difference)
+
+
+def convert_to_serializable(data):
+    if isinstance(data, dict):
+        return {k: convert_to_serializable(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [convert_to_serializable(item) for item in data]
+    elif hasattr(data, "tolist"):  # Check for numpy arrays
+        return data.tolist()
+    elif hasattr(data, "item"):  # Check for numpy scalar types, e.g., numpy.int32
+        return data.item()
+    else:
+        return data
+
+
+def append_data_to_json(data_dict: defaultdict, file_name: str):
+    # Attempt to read the existing data from the JSON file
+    try:
+        with open(file_name, "r") as file:
+            data = json.load(file)
+    except (FileNotFoundError, json.JSONDecodeError):
+        # If the file doesn't exist or has invalid JSON content, create an empty list and write it to the file
+        data = []
+        with open(file_name, "w") as file:
+            json.dump(data, file)
+
+    # Convert the defaultdict to a regular dict, make it JSON serializable, and append it to the list
+    serializable_data = convert_to_serializable(dict(data_dict))
+    data.append(serializable_data)
+
+    # Write the updated data back to the JSON file with indentation
+    with open(file_name, "w") as file:
+        json.dump(data, file, indent=4, default=str)
+
+
+def login(user, pin, apikey, authkey, webhook_url=None):
+    global obj, login_data
+    authkey = pyotp.TOTP(authkey)
+    obj = SmartConnect(api_key=apikey)
+    login_data = obj.generateSession(user, pin, authkey.now())
+    if login_data["message"] != "SUCCESS":
+        for attempt in range(2, 7):
+            sleep(10)
+            notifier(f"Login attempt {attempt}.", webhook_url)
+            login_data = obj.generateSession(user, pin, authkey.now())
+            if login_data["message"] == "SUCCESS":
+                break
+            if attempt == 6:
+                notifier("Login failed.", webhook_url)
+                raise Exception("Login failed.")
+    notifier(
+        f'Date: {currenttime().strftime("%d %b %Y %H:%M:%S")}\nLogged in successfully.',
+        webhook_url,
+    )
+
+
+def parse_symbol(symbol):
+    match = re.match(r"([A-Za-z]+)(\d{2}[A-Za-z]{3}\d{2})(\d+)(\w+)", symbol)
+    if match:
+        return match.groups()
+    return None
+
+
+def fetch_book(book):
+    def fetch_data(fetch_func, description, max_attempts=6, sleep_duration=2):
+        for attempt in range(1, max_attempts + 1):
+            try:
+                data = fetch_func()["data"]
+                return data
+            except DataException:
+                if attempt == max_attempts:
+                    raise Exception(
+                        f"Failed to fetch {description} due to DataException."
+                    )
+                else:
+                    sleep(sleep_duration)
+            except Exception as e:
+                if attempt == max_attempts:
+                    raise Exception(f"Failed to fetch {description}: {e}")
+                else:
+                    print(f"Error {attempt} in fetching {description}: {e}")
+                    sleep(sleep_duration)
+
+    if book == "orderbook":
+        return fetch_data(obj.orderBook, "orderbook")
+    elif book in {"positions", "position"}:
+        return fetch_data(obj.position, "positions")
+    else:
+        raise ValueError(f"Invalid book type '{book}'.")
+
+
+def lookup_and_return(book, field_to_lookup, value_to_lookup, field_to_return):
+    def filter_and_return(data: list):
+        if not isinstance(field_to_lookup, list):
+            field_to_lookup_ = [field_to_lookup]
+            value_to_lookup_ = [value_to_lookup]
+        else:
+            field_to_lookup_ = field_to_lookup
+            value_to_lookup_ = value_to_lookup
+
+        bucket = [
+            entry[field_to_return]
+            for entry in data
+            if all(
+                (
+                    entry[field] == value
+                    if not isinstance(value, list)
+                    else entry[field] in value
+                )
+                for field, value in zip(field_to_lookup_, value_to_lookup_)
+            )
+            and all(entry[field] != "" for field in field_to_lookup_)
+        ]
+
+        if len(bucket) == 0:
+            return 0
+        else:
+            return np.array(bucket)
+
+    if not (
+        isinstance(field_to_lookup, (str, list))
+        and isinstance(value_to_lookup, (str, list))
+    ):
+        raise ValueError(
+            "Both 'field_to_lookup' and 'value_to_lookup' must be strings or lists."
+        )
+
+    if isinstance(field_to_lookup, list) and isinstance(value_to_lookup, str):
+        raise ValueError(
+            "Unsupported input: 'field_to_lookup' is a list and 'value_to_lookup' is a string."
+        )
+
+    if isinstance(book, list):
+        return filter_and_return(book)
+    elif isinstance(book, str) and book in {"orderbook", "positions"}:
+        book_data = fetch_book(book)
+        return filter_and_return(book_data)
+    else:
+        raise ValueError("Invalid input")
+
+
+# Discord messenger
+def notifier(message, webhook_url=None):
+    if webhook_url is None:
+        print(message)
+        return
+    else:
+        notification_url = webhook_url
+        data = {"content": message}
+        requests.post(
+            notification_url,
+            data=json.dumps(data),
+            headers={"Content-Type": "application/json"},
+        )
+        print(message)
+    return
+
+
+# Market Hours
+def markethours():
+    if time(9, 10) < currenttime().time() < time(15, 30):
+        return True
+    else:
+        return False
+
+
+# Defining current time
+def currenttime():
+    # Adjusting for timezones
+    ist = timezone(timedelta(hours=5, minutes=30))
+    return datetime.now(ist).replace(tzinfo=None)
+
+
+def simulate_option_movement(
+    spot,
+    strike,
+    time_to_expiry,
+    flag,
+    simulated_move=0.2,
+    r=0.06,
+    vol=None,
+    price=None,
+    print_results=False,
+):
+    if price is None and vol is None:
+        raise ValueError("Either price or vol must be specified.")
+    flag = flag.lower()[0]
+    price_func = bs.put if flag.upper().startswith("P") else bs.call
+    simulated_move = simulated_move / 100
+    simulated_spot = (
+        (spot * (1 + simulated_move)) if flag == "p" else (spot * (1 - simulated_move))
+    )
+    if vol is None:
+        try:
+            vol = bs.implied_volatility(price, spot, strike, time_to_expiry, r, flag)
+        except ValueError:
+            return None
+    if price is None:
+        price = price_func(spot, strike, time_to_expiry, r, vol)
+    current_delta = bs.delta(spot, strike, time_to_expiry, r, vol, flag)
+    new_delta = bs.delta(simulated_spot, strike, time_to_expiry, r, vol, flag)
+    delta_change = new_delta - current_delta
+    average_delta = abs((new_delta + current_delta) / 2)
+    new_price = price_func(simulated_spot, strike, time_to_expiry, r, vol)
+    price_gain = price - new_price
+
+    if print_results:
+        print(
+            f"Current Delta: {current_delta:.2f}\nNew Delta: {new_delta:.2f}\n"
+            f"Delta Change: {delta_change:.2f}\nAverage Delta: {average_delta:.2f}\n"
+            f"New Price: {new_price:.2f}\nPrice Change: {price_gain:.2f}\n"
+            f"Volatility: {vol:.2f}\nSimulated Spot: {simulated_spot:.2f}\n"
+            f"Simulated Move: {simulated_move * 100:.2f}%\n"
+        )
+
+    return [price_gain, average_delta]
+
+
+def spot_price_from_future(future_price, interest_rate, time_to_future):
+    """
+    Calculate the spot price from the future price, interest rate, and time.
+
+    :param future_price: float, the future price of the asset
+    :param interest_rate: float, the annual interest rate (as a decimal, e.g., 0.05 for 5%)
+    :param time_to_future: float, the time to maturity (in years)
+    :return: float, the spot price of the asset
+    """
+    spot_price = future_price / ((1 + interest_rate) ** time_to_future)
+    return spot_price
+
+
+def fetch_lot_size(name):
+    return int(
+        scrips.loc[(scrips.name == name) & (scrips.exch_seg == "NFO"), "lotsize"].iloc[
+            0
+        ]
+    )
+
+
+def get_base(name):
+    strike_array = scrips.loc[
+        (scrips.name == name) & (scrips.exch_seg == "NFO")
+    ].sort_values("expiry_dt")
+    closest_expiry = strike_array.expiry_dt.iloc[0]
+    strike_array = (
+        strike_array.loc[strike_array.expiry_dt == closest_expiry]["strike"] / 100
+    )
+    strike_differences = np.diff(strike_array.sort_values().unique())
+    values, counts = np.unique(strike_differences, return_counts=True)
+    mode = values[np.argmax(counts)]
+    return mode
+
+
+def fetch_symbol_token(
+    name=None, expiry=None, strike=None, option_type=None, tokens=None
+):
+    """Fetches symbol & token for a given scrip name. Provide just a single world if
+    you want to fetch the symbol & token for the cash segment. If you want to fetch the
+    symbol & token for the options segment, provide name, strike, expiry, option_type.
+    Expiry should be in the DDMMMYY format. Optiontype should be CE or PE. Optionally, provide
+    a list of tokens to fetch the corresponding symbols."""
+
+    if tokens is None and name is None:
+        raise ValueError("Either name or tokens must be specified.")
+
+    if tokens is not None:
+        token_df = scrips.loc[scrips["token"].isin(tokens)]
+        symbol_token_pairs = [
+            (token_df.loc[token_df["token"] == token, "symbol"].values[0], token)
+            for token in tokens
+        ]
+        return symbol_token_pairs
+
+    if expiry is None and strike is None and option_type is None:
+        if name in ["BANKNIFTY", "NIFTY"]:
+            symbol, token = scrips.loc[
+                (scrips.name == name) & (scrips.exch_seg == "NSE"), ["symbol", "token"]
+            ].values[0]
+        elif name == "FINNIFTY":
+            futures = scrips.loc[
+                (scrips.name == name) & (scrips.instrumenttype == "FUTIDX"),
+                ["expiry", "symbol", "token"],
+            ]
+            futures["expiry"] = pd.to_datetime(futures["expiry"], format="%d%b%Y")
+            futures = futures.sort_values(by="expiry")
+            symbol, token = futures.iloc[0][["symbol", "token"]].values
+        else:
+            symbol, token = scrips.loc[
+                (scrips.name == name)
+                & (scrips.exch_seg == "NSE")
+                & (scrips.symbol.str.endswith("EQ")),
+                ["symbol", "token"],
+            ].values[0]
+    elif expiry is not None and strike is not None and option_type is not None:
+        strike = str(int(strike))  # Handle float strikes, convert to integer first
+        symbol = name + expiry + strike + option_type
+        token = scrips[scrips.symbol == symbol]["token"].tolist()[0]
+    else:
+        raise ValueError("Invalid arguments")
+
+    return symbol, token
+
+
+def get_straddle_symbol_tokens(name, strike, expiry):
+    c_symbol, c_token = fetch_symbol_token(name, expiry, strike, "CE")
+    p_symbol, p_token = fetch_symbol_token(name, expiry, strike, "PE")
+    return c_symbol, c_token, p_symbol, p_token
+
+
+def get_available_strikes(name, both_pairs=False):
+    mask = (
+        (scrips.name == name)
+        & (scrips.exch_seg == "NFO")
+        & (scrips.instrumenttype.str.startswith("OPT"))
+    )
+    filtered = scrips.loc[mask].copy()
+    filtered["strike"] = filtered["strike"] / 100
+    filtered_dict = (
+        filtered.groupby("expiry")["strike"]
+        .unique()
+        .apply(list)
+        .apply(sorted)
+        .to_dict()
+    )
+    new_keys = map(
+        lambda x: datetime.strptime(x, "%d%b%Y").strftime("%d%b%y").upper(),
+        filtered_dict.keys(),
+    )
+    filtered_dict = {k: v for k, v in zip(new_keys, filtered_dict.values())}
+    sorted_dict = {
+        k: filtered_dict[k]
+        for k in sorted(filtered_dict, key=lambda x: datetime.strptime(x, "%d%b%y"))
+    }
+    if not both_pairs:
+        return sorted_dict
+
+    def filter_dictionary(dictionary):
+        pair_filtered_dict = {
+            expiry: [strike for strike in strikes if check_strike(expiry, strike)]
+            for expiry, strikes in dictionary.items()
+        }
+        return {key: values for key, values in pair_filtered_dict.items() if values}
+
+    def check_strike(expiry, stk):
+        try:
+            return get_straddle_symbol_tokens(name, stk, expiry)
+        except IndexError:
+            # print(f"No straddle available for {name} {expiry} {stk}")
+            return False
+
+    return filter_dictionary(sorted_dict)
+
+
+# LTP function
+def fetchltp(exchange_seg, symbol, token):
+    for attempt in range(1, 6):
+        try:
+            price = obj.ltpData(exchange_seg, symbol, token)["data"]["ltp"]
+            return price
+        except DataException:
+            if attempt == 5:
+                raise DataException("Failed to fetch LTP due to DataException")
+            else:
+                sleep(1)
+                continue
+        except Exception as e:
+            if attempt == 5:
+                raise Exception(f"Error in fetching LTP: {e}")
+            else:
+                print(f"Error {attempt} in fetching LTP: {e}")
+                sleep(1)
+                continue
+
+
+def fetchpreviousclose(exchange_seg, symbol, token):
+    for attempt in range(3):
+        try:
+            previousclose = obj.ltpData(exchange_seg, symbol, token)["data"]["close"]
+            return previousclose
+        except Exception as e:
+            if attempt == 2:
+                print(f"Error in fetchpreviousclose: {e}")
+            else:
+                print(
+                    f"Error {attempt} in fetchpreviousclose: {e}\nRetrying again in 1 second"
+                )
+                sleep(1)
+
+
+def fetch_straddle_price(name, expiry, strike, return_total_price=False):
+    """Fetches the price of the straddle for a given name, expiry and strike. Expiry should be in the DDMMMYY format.
+    If return_total_price is True, then the total price of the straddle is returned. If return_total_price is False,
+    then the price of the call and put is returned as a tuple."""
+
+    call_symbol, call_token = fetch_symbol_token(name, expiry, strike, "CE")
+    put_symbol, put_token = fetch_symbol_token(name, expiry, strike, "PE")
+    call_ltp = fetchltp("NFO", call_symbol, call_token)
+    put_ltp = fetchltp("NFO", put_symbol, put_token)
+    if return_total_price:
+        return call_ltp + put_ltp
+    else:
+        return call_ltp, put_ltp
+
+
+def fetch_strangle_price(
+    name, expiry, call_strike, put_strike, return_total_price=False
+):
+    """Fetches the price of the strangle for a given name, expiry and strike. Expiry should be in the DDMMMYY format.
+    If return_total_price is True, then the total price of the strangle is returned. If return_total_price is False,
+    then the price of the call and put is returned as a tuple."""
+
+    call_symbol, call_token = fetch_symbol_token(name, expiry, call_strike, "CE")
+    put_symbol, put_token = fetch_symbol_token(name, expiry, put_strike, "PE")
+    call_ltp = fetchltp("NFO", call_symbol, call_token)
+    put_ltp = fetchltp("NFO", put_symbol, put_token)
+    if return_total_price:
+        return call_ltp + put_ltp
+    else:
+        return call_ltp, put_ltp
+
+
+# Finding ATM strike
+def findstrike(x, base):
+    number = base * round(x / base)
+    return int(number)
+
+
+def check_for_weekend(expiry):
+    expiry = datetime.strptime(expiry, "%d%b%y")
+    expiry = expiry + pd.DateOffset(minutes=930)
+    date_range = pd.date_range(currenttime().date(), expiry - timedelta(days=1))
+    return date_range.weekday.isin([5, 6]).any()
+
+
+def indices_to_trade(nifty, bnf, finnifty, multi_before_weekend=False):
+    fin_exp_closer = timetoexpiry(
+        finnifty.current_expiry, effective_time=True, in_days=True
+    ) < timetoexpiry(nifty.current_expiry, effective_time=True, in_days=True)
+    weekend_in_range = check_for_weekend(finnifty.current_expiry)
+    if fin_exp_closer:
+        if weekend_in_range and multi_before_weekend:
+            return [nifty, finnifty]
+        else:
+            return [finnifty]
+    return [nifty, bnf]
+
+
+def timetoexpiry(expiry, effective_time=False, in_days=False):
+    """Return time left to expiry"""
+    if in_days:
+        multiplier = 365
+    else:
+        multiplier = 1
+
+    expiry = datetime.strptime(expiry, "%d%b%y")
+    time_to_expiry = (
+        (expiry + pd.DateOffset(minutes=930)) - currenttime()
+    ) / timedelta(days=365)
+
+    # Subtracting holidays and weekends
+    if effective_time:
+        date_range = pd.date_range(currenttime().date(), expiry - timedelta(days=1))
+        numer_of_weekdays = sum(date_range.dayofweek > 4)
+        number_of_holidays = sum(date_range.isin(holidays))
+        time_to_expiry -= (numer_of_weekdays + number_of_holidays) / 365
+        # print(f'Number of weekdays: {numer_of_weekdays} and number of holidays: {number_of_holidays}')
+    return time_to_expiry * multiplier
+
+
+def calculate_iv(opt_price, spot, strike, tte, opt_type):
+    try:
+        return bs.implied_volatility(opt_price, spot, strike, tte, 0.06, opt_type)
+    except ValueError:
+        return None
+
+
+def straddle_iv(callprice, putprice, spot, strike, timeleft):
+    call_iv = calculate_iv(callprice, spot, strike, timeleft, "CE")
+    put_iv = calculate_iv(putprice, spot, strike, timeleft, "PE")
+
+    if call_iv is not None and put_iv is not None:
+        avg_iv = (call_iv + put_iv) / 2
+    else:
+        avg_iv = call_iv if put_iv is None else put_iv
+
+    return call_iv, put_iv, avg_iv
+
+
+def strangle_iv(callprice, putprice, spot, callstrike, putstrike, timeleft):
+    call_iv = calculate_iv(callprice, spot, callstrike, timeleft, "CE")
+    put_iv = calculate_iv(putprice, spot, putstrike, timeleft, "PE")
+
+    if call_iv is not None and put_iv is not None:
+        avg_iv = (call_iv + put_iv) / 2
+    else:
+        avg_iv = call_iv if put_iv is None else put_iv
+
+    return call_iv, put_iv, avg_iv
+
+
+def calc_greeks(position_string, position_price, underlying_price):
+    """Fetches the price, iv and delta of a stock"""
+
+    name, strike, expiry, option_type = position_string.split()
+    strike = int(strike)
+    time_left = timetoexpiry(expiry)
+
+    iv = (
+        bs.implied_volatility(
+            position_price, underlying_price, strike, time_left, 0.05, option_type
+        )
+        * 100
+    )
+    delta = bs.delta(underlying_price, strike, time_left, 0.05, iv, option_type)
+    gamma = bs.gamma(underlying_price, strike, time_left, 0.05, iv)
+
+    return iv, delta, gamma
+
+
+def get_current_vix():
+    vix = yf.Ticker("^INDIAVIX")
+    vix = vix.fast_info["last_price"]
+    return vix
+
+
+def charges(buy_premium, contract_size, num_contracts, freeze_quantity=None):
+    if freeze_quantity:
+        number_of_orders = np.ceil(num_contracts / freeze_quantity)
+    else:
+        number_of_orders = 1
+
+    buy_brokerage = 40 * number_of_orders
+    sell_brokerage = 40 * number_of_orders
+    transaction_charge_rate = 0.05 / 100
+    stt_ctt_rate = 0.0625 / 100
+    gst_rate = 18 / 100
+
+    buy_transaction_charges = (
+        buy_premium * contract_size * num_contracts * transaction_charge_rate
+    )
+    sell_transaction_charges = (
+        buy_premium * contract_size * num_contracts * transaction_charge_rate
+    )
+    stt_ctt = buy_premium * contract_size * num_contracts * stt_ctt_rate
+
+    buy_gst = (buy_brokerage + buy_transaction_charges) * gst_rate
+    sell_gst = (sell_brokerage + sell_transaction_charges) * gst_rate
+
+    total_charges = (
+        buy_brokerage
+        + sell_brokerage
+        + buy_transaction_charges
+        + sell_transaction_charges
+        + stt_ctt
+        + buy_gst
+        + sell_gst
+    )
+    charges_per_share = total_charges / (num_contracts * contract_size)
+
+    return round(charges_per_share, 1)
+
+
+# ORDER FUNCTIONS BELOW #
+
+
+def placeorder(symbol, token, qty, buyorsell, orderprice, ordertag=""):
+    """Provide symbol, token, qty (shares), buyorsell, orderprice, ordertag (optional)"""
+
+    if orderprice == "MARKET":
+        params = {
+            "variety": "NORMAL",
+            "tradingsymbol": symbol,
+            "symboltoken": token,
+            "transactiontype": buyorsell,
+            "exchange": "NFO",
+            "ordertype": "MARKET",
+            "producttype": "CARRYFORWARD",
+            "duration": "DAY",
+            "price": 0,
+            "squareoff": "0",
+            "stoploss": "0",
+            "quantity": int(qty),
+            "ordertag": ordertag,
+        }
+
+    else:
+        if buyorsell == "BUY" and orderprice < 1:
+            orderprice = 1
+        elif buyorsell == "SELL" and orderprice < 1:
+            orderprice = 0.05
+
+        params = {
+            "variety": "NORMAL",
+            "tradingsymbol": symbol,
+            "symboltoken": token,
+            "transactiontype": buyorsell,
+            "exchange": "NFO",
+            "ordertype": "LIMIT",
+            "producttype": "CARRYFORWARD",
+            "duration": "DAY",
+            "price": round(orderprice, 1),
+            "squareoff": "0",
+            "stoploss": "0",
+            "quantity": int(qty),
+            "ordertag": ordertag,
+        }
+
+    for attempt in range(1, 4):
+        try:
+            order_id = obj.placeOrder(params)
+            return order_id
+        except KeyboardInterrupt:
+            raise KeyboardInterrupt
+        except Exception as e:
+            if attempt == 3:
+                raise e
+            print(f"Error {attempt} in placing order for {symbol}: {e}")
+            sleep(2)
+            continue
+
+
+def placeSLorder(symbol, token, qty, buyorsell, triggerprice, ordertag=""):
+    executionprice = triggerprice * 1.1
+
+    params = {
+        "variety": "STOPLOSS",
+        "tradingsymbol": symbol,
+        "symboltoken": token,
+        "transactiontype": buyorsell,
+        "exchange": "NFO",
+        "ordertype": "STOPLOSS_LIMIT",
+        "producttype": "CARRYFORWARD",
+        "duration": "DAY",
+        "triggerprice": round(triggerprice, 1),
+        "price": round(executionprice, 1),
+        "squareoff": "0",
+        "stoploss": "0",
+        "quantity": int(qty),
+        "ordertag": ordertag,
+    }
+
+    for attempt in range(1, 4):
+        try:
+            order_id = obj.placeOrder(params)
+            return order_id
+        except KeyboardInterrupt:
+            raise KeyboardInterrupt
+        except Exception as e:
+            if attempt == 3:
+                raise e
+            print(f"Error {attempt} in placing SL order for {symbol}: {e}")
+            sleep(2)
+            continue
+
+
+def place_synthetic_fut_order(
+    name,
+    strike,
+    expiry,
+    buy_or_sell,
+    quantity_in_shares,
+    prices: str | tuple = "MARKET",
+):
+    """Places a synthetic future order. Quantity is in number of shares."""
+
+    strike = int(strike)
+    call_symbol, call_token = fetch_symbol_token(name, expiry, strike, "CE")
+    put_symbol, put_token = fetch_symbol_token(name, expiry, strike, "PE")
+
+    if prices == "MARKET":
+        call_price = "MARKET"
+        put_price = "MARKET"
+    else:
+        call_price, put_price = prices
+
+    call_action = "BUY" if buy_or_sell == "BUY" else "SELL"
+    put_action = "SELL" if buy_or_sell == "BUY" else "BUY"
+    order_id_call = placeorder(
+        call_symbol, call_token, quantity_in_shares, call_action, call_price
+    )
+    order_id_put = placeorder(
+        put_symbol, put_token, quantity_in_shares, put_action, put_price
+    )
+    return order_id_call, order_id_put
+
+
+def cancel_pending_orders(order_ids, variety="STOPLOSS"):
+    if isinstance(order_ids, (list, np.ndarray)):
+        for order_id in order_ids:
+            obj.cancelOrder(order_id, variety)
+    else:
+        obj.cancelOrder(order_ids, variety)

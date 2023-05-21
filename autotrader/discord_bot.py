@@ -40,13 +40,13 @@ async def exit_strats(ctx, *exit_indices):
 
 
 @bot.command(name="exitnew")
-async def exit_strats(ctx, *exit_indices):
+async def exit_strats_new(ctx, *exit_indices):
     user_id = str(ctx.message.author.id)
     client_code = bot.user_id_map.get(user_id, None)
     if client_code is None:
         await ctx.send(f"User {user_id} not found")
         return
     for index in exit_indices:
-        with open(f'{client_code}_{index}_force_exit.json', "w") as file:
+        with open(f"{client_code}_{index}_force_exit.json", "w") as file:
             json.dump(True, file)
         await ctx.send(f"Exiting {index}")

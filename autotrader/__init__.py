@@ -45,3 +45,7 @@ def get_symbols():
 scrips = get_ticker_file()
 holidays = fetch_holidays()
 symbol_df = get_symbols()
+
+scrips["expiry_dt"] = pd.to_datetime(
+    scrips[scrips.expiry != ""]["expiry"], format="%d%b%Y"
+)
