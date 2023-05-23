@@ -198,7 +198,7 @@ def intraday_trend_on_nifty(
     scan_end_time = scan_end_time.time()
 
     atf.notifier(
-        f"Nifty trender starting with {threshold_movement} threshold.",
+        f"Nifty trender starting with {threshold_movement:0.2f} threshold.",
         discord_webhook_url,
     )
     last_printed_time = atf.currenttime()
@@ -207,7 +207,7 @@ def intraday_trend_on_nifty(
     ):
         movement = ((nifty.fetch_ltp() / nifty_open_price) - 1) * 100
         if atf.currenttime() > last_printed_time + atf.timedelta(minutes=1):
-            print(f"Nifty trender: {movement} movement.")
+            print(f"Nifty trender: {movement:0.2f} movement.")
             last_printed_time = atf.currenttime()
         sleep(1)
 
@@ -215,9 +215,6 @@ def intraday_trend_on_nifty(
         atf.notifier("Nifty trender exiting due to time.", discord_webhook_url)
         return
 
-    atf.notifier(
-        f"Nifty trender triggered with {movement} movement.", discord_webhook_url
-    )
     price = nifty.fetch_ltp()
     atm_strike = atf.findstrike(price, nifty.base)
     position = "BUY" if movement > 0 else "SELL"
@@ -232,6 +229,11 @@ def intraday_trend_on_nifty(
     stop_loss_multiplier = 1.0032 if position == "SELL" else 0.9968
     stop_loss_price = price * stop_loss_multiplier
     stop_loss_hit = False
+    atf.notifier(
+        f"Nifty {position} trender triggered with {movement:0.2f} movement. Nifty at {price}. "
+        f"Stop loss at {stop_loss_price}.",
+        discord_webhook_url
+    )
     while atf.currenttime().time() < exit_time and not stop_loss_hit:
         if position == "BUY":
             stop_loss_hit = nifty.fetch_ltp() < stop_loss_price
@@ -247,7 +249,7 @@ def intraday_trend_on_nifty(
         check_status=True,
     )
     stop_loss_message = "Stop loss hit." if stop_loss_hit else ""
-    atf.notifier(f"Nifty trender exited. {stop_loss_message}", discord_webhook_url)
+    atf.notifier(f"Nifty trender exited. Nifty at {nifty.fetch_ltp()}. {stop_loss_message}", discord_webhook_url)
 
 
 def index_vs_constituents(
