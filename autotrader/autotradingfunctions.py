@@ -440,6 +440,10 @@ class Option:
         self.symbol, self.token = fetch_symbol_token(
             underlying, expiry, strike, option_type
         )
+        self.freeze_qty_in_shares = symbol_df[symbol_df["SYMBOL"] == self.underlying]["VOL_FRZ_QTY"].values[0]
+        self.lot_size = fetch_lot_size(self.underlying, expiry=self.expiry)
+        self.freeze_qty_in_lots = int(self.freeze_qty_in_shares / self.lot_size)
+        self.order_id_log = []
 
     def __repr__(self):
         return (
@@ -496,6 +500,19 @@ class Option:
     def fetch_symbol_token(self):
         return self.symbol, self.token
 
+    def place_order(self, transaction_type, quantity_in_lots, price="LIMIT"):
+        if price.upper() == "LIMIT":
+            price = self.fetch_ltp()
+            modifier = 1.05 if transaction_type.upper() == "BUY" else 0.95
+            price = price * modifier
+        spliced_orders = splice_orders(quantity_in_lots, self.freeze_qty_in_lots)
+        order_ids = []
+        for qty in spliced_orders:
+            order_id = placeorder(self.symbol, self.token, qty*self.lot_size, transaction_type, price)
+            order_ids.append(order_id)
+        self.order_id_log.append(order_ids)
+        return order_ids
+
 
 class Strangle:
     def __init__(self, call_strike, put_strike, underlying, expiry):
@@ -544,6 +561,16 @@ class Strangle:
 
     def fetch_symbol_token(self):
         return self.call_symbol, self.call_token, self.put_symbol, self.put_token
+
+    def place_order(self, transaction_type, quantity_in_lots, prices="LIMIT"):
+        if isinstance(prices, (tuple, list, np.ndarray)):
+            call_price, put_price = prices
+        else:
+            call_price = put_price = prices
+
+        call_order_ids = self.call_option.place_order(transaction_type, quantity_in_lots, call_price)
+        put_order_ids = self.put_option.place_order(transaction_type, quantity_in_lots, put_price)
+        return call_order_ids, put_order_ids
 
 
 class Straddle(Strangle):
@@ -839,26 +866,26 @@ class Index:
             df["SYMBOL"] = df["SYMBOL"].str.strip()
             freeze_qty = df[df["SYMBOL"] == self.name]["VOL_FRZ_QTY"].values[0]
             freeze_qty_in_lots = freeze_qty / self.lot_size
-            return freeze_qty_in_lots
+            return int(freeze_qty_in_lots)
         except requests.exceptions.Timeout as e:
             notifier(
                 f"Timeout error in fetching freeze limit for {self.name}: {e}",
                 self.webhook_url,
             )
             freeze_qty_in_lots = 30
-            return freeze_qty_in_lots
+            return int(freeze_qty_in_lots)
         except requests.exceptions.HTTPError as e:
             notifier(
                 f"HTTP error in fetching freeze limit for {self.name}: {e}",
                 self.webhook_url,
             )
             freeze_qty_in_lots = 30
-            return freeze_qty_in_lots
+            return int(freeze_qty_in_lots)
         except Exception as e:
             notifier(
                 f"Error in fetching freeze limit for {self.name}: {e}", self.webhook_url
             )
-            freeze_qty_in_lots = 30
+            freeze_qty_in_lots = 20
             return freeze_qty_in_lots
 
     def fetch_expirys(self, symbol: str):
@@ -868,7 +895,7 @@ class Index:
                 & (scrips.name == self.name)
         )
         expirydates = (
-            pd.to_datetime(scrips[expirymask].expiry)
+            pd.to_datetime(scrips[expirymask].expiry, format="%d%b%Y")
             .astype("datetime64[ns]")
             .sort_values()
             .unique()
@@ -923,8 +950,10 @@ class Index:
         self.previous_close = fetchpreviousclose("NSE", self.symbol, self.token)
         return self.previous_close
 
-    def fetch_atm_info(self, fut_expiry=False):
-        expiry = self.fut_expiry if fut_expiry else self.current_expiry
+    def fetch_atm_info(self, expiry='current'):
+        expiry_dict = {'current': self.current_expiry, 'next': self.next_expiry, 'month': self.month_expiry,
+                       'future': self.fut_expiry, 'fut': self.fut_expiry}
+        expiry = expiry_dict[expiry]
         price = self.fetch_ltp()
         atm_strike = findstrike(price, self.base)
         atm_straddle = Straddle(atm_strike, self.name, expiry)
@@ -942,8 +971,10 @@ class Index:
             "avg_iv": avg_iv,
         }
 
-    def fetch_otm_info(self, strike_offset, fut_expiry=False):
-        expiry = self.fut_expiry if fut_expiry else self.current_expiry
+    def fetch_otm_info(self, strike_offset, expiry='current'):
+        expiry_dict = {'current': self.current_expiry, 'next': self.next_expiry, 'month': self.month_expiry,
+                       'future': self.fut_expiry, 'fut': self.fut_expiry}
+        expiry = expiry_dict[expiry]
         price = self.fetch_ltp()
         call_strike = price * (1 + strike_offset)
         put_strike = price * (1 - strike_offset)
@@ -1120,6 +1151,20 @@ class Index:
                 self.webhook_url,
             )
             raise Exception("Orders rejected")
+        elif any(call_order_statuses == "open") or any(
+                put_order_statuses == "open"):
+            notifier(
+                f"{order_prefix}Some orders pending for {buy_or_sell} {self.name} "
+                + f"{strike_info} {expiry} {quantity_in_lots} lot(s). You can modify the orders.",
+                self.webhook_url,
+            )
+        elif any(call_order_statuses == "rejected") or any(
+                put_order_statuses == "rejected"):
+            notifier(
+                f"{order_prefix}Some orders rejected for {buy_or_sell} {self.name} "
+                + f"{strike_info} {expiry} {quantity_in_lots} lot(s). You can place the rejected orders again.",
+                self.webhook_url,
+            )
         else:
             notifier(
                 f"{order_prefix}ERROR. Order statuses uncertain for {buy_or_sell} {self.name} "
@@ -1894,7 +1939,7 @@ class Index:
                         ctb_hedge = process_ctb(ctb_threshold)
                         if ctb_hedge is not None:
                             notifier(
-                                f"{self.name} Convert to condor triggered\n",
+                                f"{self.name} Convert to butterfly triggered\n",
                                 self.webhook_url,
                             )
                             ctb_trg = True
@@ -2435,6 +2480,7 @@ class Index:
                 quantity_in_lots,
                 call_strike=ctb_hedge.call_strike,
                 put_strike=ctb_hedge.put_strike,
+                order_tag=order_tag+" CTB",
             )
             cancel_pending_orders(call_stoploss_order_ids + put_stoploss_order_ids)
             notifier(f"{self.name}: Converted to butterfly", self.webhook_url)
@@ -2898,12 +2944,14 @@ def spot_price_from_future(future_price, interest_rate, time_to_future):
     return spot_price
 
 
-def fetch_lot_size(name):
-    return int(
-        scrips.loc[(scrips.name == name) & (scrips.exch_seg == "NFO"), "lotsize"].iloc[
-            0
-        ]
-    )
+def fetch_lot_size(name, expiry=None):
+
+    if expiry is None:
+        expiry_mask = scrips.expiry_formatted == scrips.expiry_formatted
+    else:
+        expiry_mask = scrips.expiry_formatted == expiry
+    return int(scrips.loc[(scrips.name == name) & (scrips.exch_seg == "NFO") &
+                          expiry_mask, "lotsize"].iloc[0])
 
 
 def get_base(name):
@@ -3092,6 +3140,24 @@ def fetch_strangle_price(
 def findstrike(x, base):
     number = base * round(x / base)
     return int(number)
+
+
+def splice_orders(quantity_in_lots, freeze_qty):
+    if quantity_in_lots > freeze_qty:
+        loops = int(quantity_in_lots / freeze_qty)
+        if loops > large_order_threshold:
+            raise Exception(
+                "Order too big. This error was raised to prevent accidental large order placement."
+            )
+
+        remainder = quantity_in_lots % freeze_qty
+        if remainder == 0:
+            spliced_orders = [freeze_qty] * loops
+        else:
+            spliced_orders = [freeze_qty] * loops + [remainder]
+    else:
+        spliced_orders = [quantity_in_lots]
+    return spliced_orders
 
 
 def check_for_weekend(expiry):

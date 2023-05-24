@@ -1,4 +1,5 @@
 from autotrader import autotradingfunctions as atf
+import autotrader.datamodule as dm
 import threading
 from datetime import time
 from time import sleep
@@ -260,9 +261,12 @@ def index_vs_constituents(
     index_strike_offset=None,
     cutoff_pct=90,
     exposure_per_stock=10000000,
+    expirys=None,
 ):
     if index_strike_offset is None:
         index_strike_offset = strike_offset
+    if expirys is None:
+        expirys = ("future", "current")
 
     # Fetching the constituents of the index and filtering out the top x% weighted stocks
     constituents = pd.read_csv(f"autotrader/{index_symbol}_constituents.csv")
@@ -284,7 +288,7 @@ def index_vs_constituents(
 
     # BNF info
     index = atf.Index(index_symbol)
-    index_info = index.fetch_otm_info(index_strike_offset, fut_expiry=True)
+    index_info = index.fetch_otm_info(index_strike_offset, expiry=expirys[0])
     index_iv = index_info["avg_iv"]
     index_shares = (
         int(total_exposure / (index.fetch_ltp() * index.lot_size)) * index.lot_size
@@ -298,7 +302,7 @@ def index_vs_constituents(
 
     # Constituent info
     constituents = [atf.Stock(stock) for stock in constituent_tickers]
-    constituent_infos = [stock.fetch_otm_info(strike_offset) for stock in constituents]
+    constituent_infos = [stock.fetch_otm_info(strike_offset, expiry=expirys[1]) for stock in constituents]
     constituent_ivs = [stock_info["avg_iv"] for stock_info in constituent_infos]
     constituent_ivs_weighted_avg = sum(
         [constituent_ivs[i] * percent_weights[i] for i in range(number_of_stocks)]
@@ -327,6 +331,23 @@ def index_vs_constituents(
         for i, info in enumerate(constituent_trade_infos)
     ]
 
+    # Analyzing recent realized volatility
+    recent_vols = dm.get_multiple_recent_vol([index_symbol] + constituent_tickers, frequency='M-THU', periods=[2, 5, 7],
+                                             ignore_last=0)
+    index_vol = recent_vols[index_symbol]
+    constituents_vols = [recent_vols[ticker] for ticker in constituent_tickers]
+    period_vol_dict = {}
+    for period in index_vol:
+        index_period_vol = index_vol[period][0]
+        constituents_period_vols = [ticker[period][0] for ticker in constituents_vols]
+        constituents_period_vols_weighted_avg = sum(
+            [constituents_period_vols[i] * percent_weights[i] for i in range(number_of_stocks)]
+        )
+        period_vol_dict[period] = {
+            "index": index_period_vol,
+            "constituents_vols_weighted_avg": constituents_period_vols_weighted_avg,
+        }
+
     # Returning the data
     return {
         "index_iv": index_iv,
@@ -345,4 +366,5 @@ def index_vs_constituents(
         "index_trade_info": index_trade_info,
         "constituent_trade_infos": constituent_trade_infos,
         "break_even_points_per_stock": break_even_points_per_stock,
+        "period_vol_dict": period_vol_dict
     }

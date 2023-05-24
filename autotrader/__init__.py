@@ -49,3 +49,5 @@ symbol_df = get_symbols()
 scrips["expiry_dt"] = pd.to_datetime(
     scrips[scrips.expiry != ""]["expiry"], format="%d%b%Y"
 )
+scrips["expiry_formatted"] = scrips["expiry_dt"].dt.strftime("%d%b%y")
+scrips["expiry_formatted"] = scrips["expiry_formatted"].str.upper()
