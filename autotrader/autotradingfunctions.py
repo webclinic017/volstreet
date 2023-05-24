@@ -129,6 +129,17 @@ class PriceFeed(SmartWebSocketV2):
         return new_price_dict
 
     def add_options(self, *underlyings, range_of_strikes=10, expiries=None, mode=1):
+
+        """Adds options for the given underlyings to the symbol_option_chains dictionary.
+        Params:
+        underlyings is a list of underlying objects not strings
+        If expiries is None, then the current, next and month expiry are added.
+        If expiries is 'current', then only the current expiry is added.
+        If expiries is a dictionary, then the expiries for each underlying are added.
+        range_of_strikes is the number of strikes to be added on either side of the current price.
+        mode is the mode of the websocket connection. 1 for LTP, 3 for full market depth.
+        """
+
         def get_option_tokens(name, strike, expiry):
             _, c_token = fetch_symbol_token(name, expiry, strike, "CE")
             _, p_token = fetch_symbol_token(name, expiry, strike, "PE")
@@ -576,7 +587,7 @@ class SyntheticArbSystem:
         )
 
     def find_arbitrage_opportunities(
-            self, index, expiry, qty, exit_time=(15, 28), threshold=3, at_market=False
+            self, index: str, expiry: str, qty: int, exit_time=(15, 28), threshold=3, at_market=False
     ):
         (
             strikes,

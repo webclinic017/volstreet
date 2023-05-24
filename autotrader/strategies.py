@@ -100,8 +100,10 @@ def intraday_straddles_on_indices(
     for thread in straddle_threads:
         thread.join()
 
-    shared_data.force_stop = True
-    update_data_thread.join()
+    # Stop the data updater thread
+    if shared_data and update_data_thread is not None:
+        shared_data.force_stop = True
+        update_data_thread.join()
 
     # Call the data appender function on the traded indices
     for index in indices:
