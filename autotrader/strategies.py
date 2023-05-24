@@ -235,7 +235,7 @@ def intraday_trend_on_nifty(
     atf.notifier(
         f"Nifty {position} trender triggered with {movement:0.2f} movement. Nifty at {price}. "
         f"Stop loss at {stop_loss_price}.",
-        discord_webhook_url
+        discord_webhook_url,
     )
     while atf.currenttime().time() < exit_time and not stop_loss_hit:
         if position == "BUY":
@@ -252,7 +252,10 @@ def intraday_trend_on_nifty(
         check_status=True,
     )
     stop_loss_message = "Stop loss hit." if stop_loss_hit else ""
-    atf.notifier(f"Nifty trender exited. Nifty at {nifty.fetch_ltp()}. {stop_loss_message}", discord_webhook_url)
+    atf.notifier(
+        f"Nifty trender exited. Nifty at {nifty.fetch_ltp()}. {stop_loss_message}",
+        discord_webhook_url,
+    )
 
 
 def index_vs_constituents(
@@ -262,109 +265,137 @@ def index_vs_constituents(
     cutoff_pct=90,
     exposure_per_stock=10000000,
     expirys=None,
+    ignore_last=0,
 ):
-    if index_strike_offset is None:
-        index_strike_offset = strike_offset
-    if expirys is None:
-        expirys = ("future", "current")
+    index_strike_offset = (
+        strike_offset if index_strike_offset is None else index_strike_offset
+    )
+    expirys = ("future", "current") if expirys is None else expirys
 
-    # Fetching the constituents of the index and filtering out the top x% weighted stocks
-    constituents = pd.read_csv(f"autotrader/{index_symbol}_constituents.csv")
-    constituents = constituents.sort_values("Index weight", ascending=False)
-    constituents["cum_weight"] = constituents["Index weight"].cumsum()
-    constituents = constituents[constituents.cum_weight < cutoff_pct]
-    constituent_tickers = constituents.Ticker.to_list()
-    constituent_weights = constituents["Index weight"].to_list()
+    # Fetch and filter constituents
+    constituents = (
+        pd.read_csv(f"autotrader/{index_symbol}_constituents.csv")
+        .sort_values("Index weight", ascending=False)
+        .assign(cum_weight=lambda df: df["Index weight"].cumsum())
+        .loc[lambda df: df.cum_weight < cutoff_pct]
+    )
 
-    # Calculating the exposure per stock
-    total_weight = sum(constituent_weights)
+    constituent_tickers, constituent_weights = (
+        constituents.Ticker.to_list(),
+        constituents["Index weight"].to_list(),
+    )
+    total_weight, number_of_stocks = sum(constituent_weights), len(constituent_tickers)
     percent_weights = [weight / total_weight for weight in constituent_weights]
-    number_of_stocks = len(constituent_tickers)
     total_exposure = exposure_per_stock * number_of_stocks
-    weighted_exposures = [
-        (exposure_per_stock * number_of_stocks) * percent_weights[i]
-        for i in range(number_of_stocks)
-    ]
 
-    # BNF info
+    # Fetch index info
     index = atf.Index(index_symbol)
     index_info = index.fetch_otm_info(index_strike_offset, expiry=expirys[0])
-    index_iv = index_info["avg_iv"]
-    index_shares = (
-        int(total_exposure / (index.fetch_ltp() * index.lot_size)) * index.lot_size
+    index_iv, index_shares = (
+        index_info["avg_iv"],
+        int(total_exposure / (index.fetch_ltp() * index.lot_size)) * index.lot_size,
     )
     index_premium_value = index_info["total_price"] * index_shares
-    index_trade_info = (
-        index_info["underlying_price"],
-        index_info["call_strike"],
-        index_info["put_strike"],
+    index_break_even_points = (index_info["underlying_price"],)
+    index_break_even_points += (
+        index_info["call_strike"] + index_info["call_price"],
+        index_info["put_strike"] - index_info["put_price"],
     )
 
-    # Constituent info
-    constituents = [atf.Stock(stock) for stock in constituent_tickers]
-    constituent_infos = [stock.fetch_otm_info(strike_offset, expiry=expirys[1]) for stock in constituents]
-    constituent_ivs = [stock_info["avg_iv"] for stock_info in constituent_infos]
-    constituent_ivs_weighted_avg = sum(
-        [constituent_ivs[i] * percent_weights[i] for i in range(number_of_stocks)]
+    # Calculate movements to break even
+    def _return_abs_movement(current_price, threshold_price):
+        return abs((threshold_price / current_price - 1)) * 100
+
+    index_break_even_points += tuple(
+        _return_abs_movement(index_info["underlying_price"], bep)
+        for bep in index_break_even_points[1:3]
     )
-    constituent_ivs_unweighted_avg = sum(constituent_ivs) / number_of_stocks
+    index_call_break_even, index_put_break_even = index_break_even_points[-2:]
+
+    # Fetch constituent info
+    constituents = list(map(atf.Stock, constituent_tickers))
+    constituent_infos = [
+        stock.fetch_otm_info(strike_offset, expiry=expirys[1]) for stock in constituents
+    ]
+    constituent_ivs = [info["avg_iv"] for info in constituent_infos]
+    constituent_ivs_weighted_avg = sum(
+        iv * pw for iv, pw in zip(constituent_ivs, percent_weights)
+    )
+    weighted_exposures = [total_exposure * pw for pw in percent_weights]
     shares_per_stock = [
         int(exposure / (stock.fetch_ltp() * stock.lot_size)) * stock.lot_size
         for exposure, stock in zip(weighted_exposures, constituents)
     ]
-    premium_per_stock = [stock_info["total_price"] for stock_info in constituent_infos]
+    premium_per_stock = [info["total_price"] for info in constituent_infos]
     premium_values_per_stock = [
-        premium_per_stock[i] * shares_per_stock[i] for i in range(number_of_stocks)
+        premium * shares for premium, shares in zip(premium_per_stock, shares_per_stock)
     ]
-    total_constituents_premium_value = sum(premium_values_per_stock)
-    premium_difference = total_constituents_premium_value - index_premium_value
-    constituent_trade_infos = [
+    premium_difference = sum(premium_values_per_stock) - index_premium_value
+    break_even_points_per_stock = [
         (
-            stock_info["underlying_price"],
-            stock_info["call_strike"],
-            stock_info["put_strike"],
+            info["underlying_price"],
+            info["call_strike"] + premium,
+            info["put_strike"] - premium,
         )
-        for stock_info in constituent_infos
+        for info, premium in zip(constituent_infos, premium_per_stock)
     ]
     break_even_points_per_stock = [
-        (info[1] + premium_per_stock[i], info[2] - premium_per_stock[i])
-        for i, info in enumerate(constituent_trade_infos)
+        (
+            bep[0],
+            bep[1],
+            bep[2],
+            _return_abs_movement(info["underlying_price"], bep[1]),
+            _return_abs_movement(info["underlying_price"], bep[2]),
+        )
+        for bep, info in zip(break_even_points_per_stock, constituent_infos)
+    ]
+
+    # Average break evens
+    break_evens_weighted_avg = [
+        sum(
+            bep[i] * pw for bep, pw in zip(break_even_points_per_stock, percent_weights)
+        )
+        for i in [3, 4]
     ]
 
     # Analyzing recent realized volatility
-    recent_vols = dm.get_multiple_recent_vol([index_symbol] + constituent_tickers, frequency='M-THU', periods=[2, 5, 7],
-                                             ignore_last=0)
-    index_vol = recent_vols[index_symbol]
-    constituents_vols = [recent_vols[ticker] for ticker in constituent_tickers]
-    period_vol_dict = {}
-    for period in index_vol:
-        index_period_vol = index_vol[period][0]
-        constituents_period_vols = [ticker[period][0] for ticker in constituents_vols]
-        constituents_period_vols_weighted_avg = sum(
-            [constituents_period_vols[i] * percent_weights[i] for i in range(number_of_stocks)]
-        )
-        period_vol_dict[period] = {
-            "index": index_period_vol,
-            "constituents_vols_weighted_avg": constituents_period_vols_weighted_avg,
+    recent_vols = dm.get_multiple_recent_vol(
+        [index_symbol] + constituent_tickers,
+        frequency="M-THU",
+        periods=[2, 5, 7],
+        ignore_last=ignore_last,
+    )
+    period_vol_dict = {
+        f"Last {period} period avg": {
+            "index": recent_vols[index_symbol][period][0],
+            "constituents_vols_weighted_avg": sum(
+                ticker[period][0] * pw
+                for ticker, pw in zip(list(recent_vols.values())[1:], percent_weights)
+            ),
         }
+        for period in recent_vols[index_symbol]
+    }
 
-    # Returning the data
+    # Return the data
     return {
         "index_iv": index_iv,
         "constituents_iv_weighted": constituent_ivs_weighted_avg,
-        "constituents_iv_unweighted": constituent_ivs_unweighted_avg,
+        "constituents_iv_unweighted": sum(constituent_ivs) / number_of_stocks,
         "index_shares": index_shares,
         "index_premium_value": index_premium_value,
         "constituent_tickers": constituent_tickers,
         "constituent_weights": constituent_weights,
         "shares_per_stock": shares_per_stock,
         "premium_values_per_stock": premium_values_per_stock,
-        "total_constituents_premium_value": total_constituents_premium_value,
+        "total_constituents_premium_value": sum(premium_values_per_stock),
         "premium_value_difference": premium_difference,
         "total_exposure": total_exposure,
         "profit_percentage": premium_difference / total_exposure * 100,
-        "index_trade_info": index_trade_info,
-        "constituent_trade_infos": constituent_trade_infos,
-        "break_even_points_per_stock": break_even_points_per_stock,
-        "period_vol_dict": period_vol_dict
+        "index_trade_info": index_break_even_points,
+        "constituent_trade_infos": break_even_points_per_stock,
+        "index_call_break_even": index_call_break_even,
+        "index_put_break_even": index_put_break_even,
+        "call_side_break_evens_wtd_avg": break_evens_weighted_avg[0],
+        "put_side_break_evens_wtd_avg": break_evens_weighted_avg[1],
+        "recent_vols": period_vol_dict,
     }

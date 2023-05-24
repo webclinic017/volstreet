@@ -129,7 +129,6 @@ class PriceFeed(SmartWebSocketV2):
         return new_price_dict
 
     def add_options(self, *underlyings, range_of_strikes=10, expiries=None, mode=1):
-
         """Adds options for the given underlyings to the symbol_option_chains dictionary.
         Params:
         underlyings is a list of underlying objects not strings
@@ -201,14 +200,14 @@ class PriceFeed(SmartWebSocketV2):
         sleep(3)
 
     def update_option_chain(
-            self,
-            sleep_time=5,
-            exit_time=(15, 30),
-            process_iv_log=True,
-            market_depth=True,
-            calculate_iv=True,
-            n_values=100,
-            iv_threshold=1.1,
+        self,
+        sleep_time=5,
+        exit_time=(15, 30),
+        process_iv_log=True,
+        market_depth=True,
+        calculate_iv=True,
+        n_values=100,
+        iv_threshold=1.1,
     ):
         while currenttime().time() < time(*exit_time):
             parsed_dict = self.parse_price_dict()
@@ -232,15 +231,15 @@ class PriceFeed(SmartWebSocketV2):
             sleep(sleep_time)
 
     def build_option_chain(
-            self,
-            index: str,
-            expiry: str,
-            parsed_dict: dict,
-            market_depth,
-            process_iv_log,
-            calculate_iv,
-            n_values,
-            iv_threshold,
+        self,
+        index: str,
+        expiry: str,
+        parsed_dict: dict,
+        market_depth,
+        process_iv_log,
+        calculate_iv,
+        n_values,
+        iv_threshold,
     ):
         instrument_info = parsed_dict[index]
         spot = instrument_info["ltp"]
@@ -264,7 +263,7 @@ class PriceFeed(SmartWebSocketV2):
                 if calculate_iv:
                     time_to_expiry = timetoexpiry(expiry)
                     if time_to_expiry < 3 / (
-                            24 * 365
+                        24 * 365
                     ):  # If time to expiry is less than 3 hours stop calculating iv
                         continue
                     call_iv, put_iv, avg_iv = straddle_iv(
@@ -316,16 +315,16 @@ class PriceFeed(SmartWebSocketV2):
                     ] = put_option["best_ask_qty"]
 
     def process_iv_log(
-            self,
-            index,
-            spot,
-            strike,
-            expiry,
-            call_iv,
-            put_iv,
-            avg_iv,
-            n_values,
-            iv_threshold,
+        self,
+        index,
+        spot,
+        strike,
+        expiry,
+        call_iv,
+        put_iv,
+        avg_iv,
+        n_values,
+        iv_threshold,
     ):
         if strike not in self.iv_log[index][expiry]:
             self.iv_log[index][expiry][strike] = {
@@ -383,7 +382,7 @@ class PriceFeed(SmartWebSocketV2):
         return call_ivs, put_ivs, total_ivs
 
     def check_and_notify(
-            self, iv, running_avg_iv, iv_type, idx, idx_price, K, exp, iv_hurdle
+        self, iv, running_avg_iv, iv_type, idx, idx_price, K, exp, iv_hurdle
     ):
         not_in_the_money_by_100 = False
 
@@ -393,11 +392,11 @@ class PriceFeed(SmartWebSocketV2):
             not_in_the_money_by_100 = idx_price >= K + 100
 
         if (
-                iv
-                and iv > iv_hurdle * running_avg_iv
-                and self.iv_log[idx][exp][K]["last_notified_time"]
-                < currenttime() - timedelta(minutes=5)
-                and not_in_the_money_by_100
+            iv
+            and iv > iv_hurdle * running_avg_iv
+            and self.iv_log[idx][exp][K]["last_notified_time"]
+            < currenttime() - timedelta(minutes=5)
+            and not_in_the_money_by_100
         ):
             notifier(
                 f"{iv_type} IV for {idx} {K} greater than average.\nIV: {iv}\n"
@@ -440,7 +439,9 @@ class Option:
         self.symbol, self.token = fetch_symbol_token(
             underlying, expiry, strike, option_type
         )
-        self.freeze_qty_in_shares = symbol_df[symbol_df["SYMBOL"] == self.underlying]["VOL_FRZ_QTY"].values[0]
+        self.freeze_qty_in_shares = symbol_df[symbol_df["SYMBOL"] == self.underlying][
+            "VOL_FRZ_QTY"
+        ].values[0]
         self.lot_size = fetch_lot_size(self.underlying, expiry=self.expiry)
         self.freeze_qty_in_lots = int(self.freeze_qty_in_shares / self.lot_size)
         self.order_id_log = []
@@ -508,7 +509,9 @@ class Option:
         spliced_orders = splice_orders(quantity_in_lots, self.freeze_qty_in_lots)
         order_ids = []
         for qty in spliced_orders:
-            order_id = placeorder(self.symbol, self.token, qty*self.lot_size, transaction_type, price)
+            order_id = placeorder(
+                self.symbol, self.token, qty * self.lot_size, transaction_type, price
+            )
             order_ids.append(order_id)
         self.order_id_log.append(order_ids)
         return order_ids
@@ -568,8 +571,12 @@ class Strangle:
         else:
             call_price = put_price = prices
 
-        call_order_ids = self.call_option.place_order(transaction_type, quantity_in_lots, call_price)
-        put_order_ids = self.put_option.place_order(transaction_type, quantity_in_lots, put_price)
+        call_order_ids = self.call_option.place_order(
+            transaction_type, quantity_in_lots, call_price
+        )
+        put_order_ids = self.put_option.place_order(
+            transaction_type, quantity_in_lots, put_price
+        )
         return call_order_ids, put_order_ids
 
 
@@ -614,7 +621,13 @@ class SyntheticArbSystem:
         )
 
     def find_arbitrage_opportunities(
-            self, index: str, expiry: str, qty: int, exit_time=(15, 28), threshold=3, at_market=False
+        self,
+        index: str,
+        expiry: str,
+        qty: int,
+        exit_time=(15, 28),
+        threshold=3,
+        at_market=False,
     ):
         (
             strikes,
@@ -663,8 +676,8 @@ class SyntheticArbSystem:
                 max_strike_call_bid = call_bids[max_price_index]
                 max_strike_put_ask = put_asks[max_price_index]
                 if at_market:
-                    buy_prices = 'MARKET'
-                    sell_prices = 'MARKET'
+                    buy_prices = "MARKET"
+                    sell_prices = "MARKET"
                 else:
                     buy_prices = (min_strike_call_ask, min_strike_put_bid)
                     sell_prices = (max_strike_call_bid, max_strike_put_ask)
@@ -718,15 +731,15 @@ class SyntheticArbSystem:
             max_price = synthetic_sell_prices[max_price_index]
 
     def execute_synthetic_trade(
-            self,
-            index,
-            expiry,
-            qty,
-            buy_strike,
-            buy_strike_prices,
-            sell_strike,
-            sell_strike_prices,
-            sleep_interval=1,
+        self,
+        index,
+        expiry,
+        qty,
+        buy_strike,
+        buy_strike_prices,
+        sell_strike,
+        sell_strike_prices,
+        sleep_interval=1,
     ):
         id_call_buy, id_put_sell = place_synthetic_fut_order(
             index, buy_strike, expiry, "BUY", qty, buy_strike_prices
@@ -890,9 +903,9 @@ class Index:
 
     def fetch_expirys(self, symbol: str):
         expirymask = (
-                (scrips.expiry != "")
-                & (scrips.exch_seg == "NFO")
-                & (scrips.name == self.name)
+            (scrips.expiry != "")
+            & (scrips.exch_seg == "NFO")
+            & (scrips.name == self.name)
         )
         expirydates = (
             pd.to_datetime(scrips[expirymask].expiry, format="%d%b%Y")
@@ -950,9 +963,14 @@ class Index:
         self.previous_close = fetchpreviousclose("NSE", self.symbol, self.token)
         return self.previous_close
 
-    def fetch_atm_info(self, expiry='current'):
-        expiry_dict = {'current': self.current_expiry, 'next': self.next_expiry, 'month': self.month_expiry,
-                       'future': self.fut_expiry, 'fut': self.fut_expiry}
+    def fetch_atm_info(self, expiry="current"):
+        expiry_dict = {
+            "current": self.current_expiry,
+            "next": self.next_expiry,
+            "month": self.month_expiry,
+            "future": self.fut_expiry,
+            "fut": self.fut_expiry,
+        }
         expiry = expiry_dict[expiry]
         price = self.fetch_ltp()
         atm_strike = findstrike(price, self.base)
@@ -971,9 +989,14 @@ class Index:
             "avg_iv": avg_iv,
         }
 
-    def fetch_otm_info(self, strike_offset, expiry='current'):
-        expiry_dict = {'current': self.current_expiry, 'next': self.next_expiry, 'month': self.month_expiry,
-                       'future': self.fut_expiry, 'fut': self.fut_expiry}
+    def fetch_otm_info(self, strike_offset, expiry="current"):
+        expiry_dict = {
+            "current": self.current_expiry,
+            "next": self.next_expiry,
+            "month": self.month_expiry,
+            "future": self.fut_expiry,
+            "fut": self.fut_expiry,
+        }
         expiry = expiry_dict[expiry]
         price = self.fetch_ltp()
         call_strike = price * (1 + strike_offset)
@@ -1037,15 +1060,15 @@ class Index:
         return spliced_orders
 
     def place_combined_order(
-            self,
-            expiry,
-            buy_or_sell,
-            quantity_in_lots,
-            strike=None,
-            call_strike=None,
-            put_strike=None,
-            return_avg_price=False,
-            order_tag="",
+        self,
+        expiry,
+        buy_or_sell,
+        quantity_in_lots,
+        strike=None,
+        call_strike=None,
+        put_strike=None,
+        return_avg_price=False,
+        order_tag="",
     ):
         """
         Places a straddle or strangle order on the index.
@@ -1117,7 +1140,7 @@ class Index:
         order_prefix = f"{order_tag}: " if order_tag else ""
 
         if all(call_order_statuses == "complete") and all(
-                put_order_statuses == "complete"
+            put_order_statuses == "complete"
         ):
             notifier(
                 f"{order_prefix}Order(s) placed successfully for {buy_or_sell} {self.name} "
@@ -1143,7 +1166,7 @@ class Index:
             else:
                 return
         elif all(call_order_statuses == "rejected") and all(
-                put_order_statuses == "rejected"
+            put_order_statuses == "rejected"
         ):
             notifier(
                 f"{order_prefix}All orders rejected for {buy_or_sell} {self.name} "
@@ -1151,15 +1174,15 @@ class Index:
                 self.webhook_url,
             )
             raise Exception("Orders rejected")
-        elif any(call_order_statuses == "open") or any(
-                put_order_statuses == "open"):
+        elif any(call_order_statuses == "open") or any(put_order_statuses == "open"):
             notifier(
                 f"{order_prefix}Some orders pending for {buy_or_sell} {self.name} "
                 + f"{strike_info} {expiry} {quantity_in_lots} lot(s). You can modify the orders.",
                 self.webhook_url,
             )
         elif any(call_order_statuses == "rejected") or any(
-                put_order_statuses == "rejected"):
+            put_order_statuses == "rejected"
+        ):
             notifier(
                 f"{order_prefix}Some orders rejected for {buy_or_sell} {self.name} "
                 + f"{strike_info} {expiry} {quantity_in_lots} lot(s). You can place the rejected orders again.",
@@ -1174,13 +1197,13 @@ class Index:
             raise Exception("Order statuses uncertain")
 
     def place_synthetic_fut_order(
-            self,
-            strike,
-            expiry,
-            buy_or_sell,
-            quantity_in_lots,
-            prices="LIMIT",
-            check_status=True,
+        self,
+        strike,
+        expiry,
+        buy_or_sell,
+        quantity_in_lots,
+        prices="LIMIT",
+        check_status=True,
     ):
         """Places a synthetic future order. Quantity is in number of shares."""
         name = self.name
@@ -1233,7 +1256,7 @@ class Index:
             )
 
             if all(call_order_statuses == "complete") and all(
-                    put_order_statuses == "complete"
+                put_order_statuses == "complete"
             ):
                 logger2.info(
                     f"Synthetic Order(s) placed successfully for {buy_or_sell} {name} {strike} {expiry} "
@@ -1244,7 +1267,7 @@ class Index:
                     f"{quantity_in_lots} lot(s)."
                 )
             elif all(call_order_statuses == "rejected") and all(
-                    put_order_statuses == "rejected"
+                put_order_statuses == "rejected"
             ):
                 logger2.info(
                     f"All synthetic orders rejected for {buy_or_sell} {name} {strike} "
@@ -1255,7 +1278,7 @@ class Index:
                     f"{expiry} {quantity_in_lots} lot(s)."
                 )
             elif any(call_order_statuses == "pending") and any(
-                    put_order_statuses == "pending"
+                put_order_statuses == "pending"
             ):
                 logger2.info(
                     f"Some synthetic orders pending for {buy_or_sell} {name} {strike} "
@@ -1272,7 +1295,7 @@ class Index:
                 )
 
     def find_equal_strike(
-            self, exit_time, websocket, wait_for_equality, target_disparity, expiry=None
+        self, exit_time, websocket, wait_for_equality, target_disparity, expiry=None
     ):
         expiry = expiry or self.current_expiry
         ltp = (
@@ -1412,7 +1435,7 @@ class Index:
 
     @log_errors
     def rollover_overnight_short_straddle(
-            self, quantity_in_lots, strike_offset=1, iv_threshold=0.95, take_avg_price=False
+        self, quantity_in_lots, strike_offset=1, iv_threshold=0.95, take_avg_price=False
     ):
         """Rollover overnight short straddle to the next expiry.
         Args:
@@ -1472,7 +1495,7 @@ class Index:
         weekend_in_expiry = check_for_weekend(self.current_expiry)
 
         if (
-                timetoexpiry(self.current_expiry, effective_time=True, in_days=True) > 4
+            timetoexpiry(self.current_expiry, effective_time=True, in_days=True) > 4
         ) or weekend_in_expiry:  # far from expiry
             ltp = avg_ltp if avg_ltp else self.fetch_ltp()
             sell_strike = findstrike(ltp * strike_offset, self.base)
@@ -1494,7 +1517,7 @@ class Index:
                     f"IV is fine compared to VIX: IV {iv}, Vix {vix}.", self.webhook_url
                 )
         elif (
-                timetoexpiry(self.current_expiry, effective_time=True, in_days=True) < 2
+            timetoexpiry(self.current_expiry, effective_time=True, in_days=True) < 2
         ):  # only exit
             sell_strike = None
         else:
@@ -1505,9 +1528,9 @@ class Index:
         buy_strike = trade_data[self.name]
 
         if (
-                not isinstance(buy_strike, int)
-                and not isinstance(buy_strike, float)
-                and buy_strike is not None
+            not isinstance(buy_strike, int)
+            and not isinstance(buy_strike, float)
+            and buy_strike is not None
         ):
             notifier(f"Invalid strike found for {self.name}.", self.webhook_url)
             raise Exception(f"Invalid strike found for {self.name}.")
@@ -1614,12 +1637,12 @@ class Index:
         save_data(trade_data)
 
     def buy_weekly_hedge(
-            self,
-            quantity_in_lots,
-            type_of_hedge="strangle",
-            strike_offset=1,
-            call_offset=1,
-            put_offset=1,
+        self,
+        quantity_in_lots,
+        type_of_hedge="strangle",
+        strike_offset=1,
+        call_offset=1,
+        put_offset=1,
     ):
         ltp = self.fetch_ltp()
         if type_of_hedge == "strangle":
@@ -1655,26 +1678,26 @@ class Index:
 
     @log_errors
     def intraday_straddle(
-            self,
-            quantity_in_lots,
-            exit_time=(15, 28),
-            websocket=None,
-            wait_for_equality=False,
-            move_sl=False,
-            shared_data=None,
-            stoploss="dynamic",
-            target_disparity=10,
-            catch_trend=False,
-            trend_qty_ratio=0.5,
-            trend_catcher_sl=0.003,
-            safeguard=False,
-            safeguard_movement=0.0035,
-            safeguard_spike=1.2,
-            smart_exit=False,
-            take_profit=False,
-            take_profit_points=np.inf,
-            convert_to_butterfly=False,
-            check_force_exit=False,
+        self,
+        quantity_in_lots,
+        exit_time=(15, 28),
+        websocket=None,
+        wait_for_equality=False,
+        move_sl=False,
+        shared_data=None,
+        stoploss="dynamic",
+        target_disparity=10,
+        catch_trend=False,
+        trend_qty_ratio=0.5,
+        trend_catcher_sl=0.003,
+        safeguard=False,
+        safeguard_movement=0.0035,
+        safeguard_spike=1.2,
+        smart_exit=False,
+        take_profit=False,
+        take_profit_points=np.inf,
+        convert_to_butterfly=False,
+        check_force_exit=False,
     ):
         """Params:
         quantity_in_lots: int
@@ -1791,7 +1814,7 @@ class Index:
         )
 
         if all(call_sl_statuses == "trigger pending") and all(
-                put_sl_statuses == "trigger pending"
+            put_sl_statuses == "trigger pending"
         ):
             notifier(
                 f"{self.name} stoploss orders placed successfully", self.webhook_url
@@ -1867,8 +1890,8 @@ class Index:
                 )  #
                 # Hard-coding 2 strikes for now
                 hedges = [*zip(strike_range, strike_range[::-1])][
-                         -2:
-                         ]  # Hard-coding 2 hedges for now
+                    -2:
+                ]  # Hard-coding 2 hedges for now
                 hedges = np.array(
                     [Strangle(pair[0], pair[1], self.name, expiry) for pair in hedges]
                 )
@@ -1882,7 +1905,7 @@ class Index:
                     ]
                 )
                 hedge_profits = (
-                        total_avg_price - hedges_ltps + distance_from_equal_strike
+                    total_avg_price - hedges_ltps + distance_from_equal_strike
                 )
                 filtered_hedge = hedges[np.where(hedge_profits > profit_threshold)]
                 print(
@@ -1895,9 +1918,15 @@ class Index:
             while in_trade and not error_faced:
                 # Update prices
                 if websocket:
-                    underlying_price = websocket.price_dict.get(self.token, {"ltp": None})["ltp"]
-                    call_price = websocket.price_dict.get(call_token, {"ltp": None})["ltp"]
-                    put_price = websocket.price_dict.get(put_token, {"ltp": None})["ltp"]
+                    underlying_price = websocket.price_dict.get(
+                        self.token, {"ltp": None}
+                    )["ltp"]
+                    call_price = websocket.price_dict.get(call_token, {"ltp": None})[
+                        "ltp"
+                    ]
+                    put_price = websocket.price_dict.get(put_token, {"ltp": None})[
+                        "ltp"
+                    ]
                 else:
                     underlying_price = self.fetch_ltp()
                     call_price = fetchltp("NFO", call_symbol, call_token)
@@ -1918,7 +1947,7 @@ class Index:
 
                 # Continuously check if profit is greater than target profit
                 if take_profit and profit_in_pts > (
-                        take_profit_points + per_share_charges
+                    take_profit_points + per_share_charges
                 ):
                     notifier(
                         f"{self.name} take profit exit triggered\n"
@@ -1930,10 +1959,10 @@ class Index:
 
                 # If no stop-loss is hit, and it is expiry day, then check for potential hedge purchase
                 if (
-                        not (callsl or putsl)
-                        and days_to_expiry < 1
-                        and convert_to_butterfly
-                        and not ctb_notification_sent
+                    not (callsl or putsl)
+                    and days_to_expiry < 1
+                    and convert_to_butterfly
+                    and not ctb_notification_sent
                 ):
                     try:
                         ctb_hedge = process_ctb(ctb_threshold)
@@ -1959,10 +1988,10 @@ class Index:
 
                 # If one of the stop-losses is hit then checking for smart exit
                 if (
-                        smart_exit
-                        and (callsl or putsl)
-                        and (call_iv or put_iv)
-                        and not smart_exit_notification_sent
+                    smart_exit
+                    and (callsl or putsl)
+                    and (call_iv or put_iv)
+                    and not smart_exit_notification_sent
                 ):
                     option_type = "p" if callsl else "c"
                     option_price = put_price if callsl else call_price
@@ -2000,13 +2029,13 @@ class Index:
                 stoploss_message = ""
                 if callsl:
                     stoploss_message += (
-                            f"Call Exit Price: {mtm_ce_price}\nIncr. Gains: {incremental_gains}\n"
-                            + f"Avg. Delta: {average_delta}\n"
+                        f"Call Exit Price: {mtm_ce_price}\nIncr. Gains: {incremental_gains}\n"
+                        + f"Avg. Delta: {average_delta}\n"
                     )
                 if putsl:
                     stoploss_message += (
-                            f"Put Exit Price: {mtm_pe_price}\nIncr. Gains: {incremental_gains}\n"
-                            + f"Avg. Delta: {average_delta}\n"
+                        f"Put Exit Price: {mtm_pe_price}\nIncr. Gains: {incremental_gains}\n"
+                        + f"Avg. Delta: {average_delta}\n"
                     )
                 print_iv = avg_iv if avg_iv is not None else 0
                 if currenttime() - last_print_time > print_interval:
@@ -2023,7 +2052,7 @@ class Index:
                     last_print_time = currenttime()
 
         def process_order_statuses(
-                order_book, order_ids, stop_loss=False, notify_url=None, context=""
+            order_book, order_ids, stop_loss=False, notify_url=None, context=""
         ):
             nonlocal orderbook
 
@@ -2040,7 +2069,7 @@ class Index:
                     order_book, "orderid", order_ids, "text"
                 )
                 if all(
-                        rejection_reasons == "17070 : The Price is out of the LPP range"
+                    rejection_reasons == "17070 : The Price is out of the LPP range"
                 ):
                     return True, False
                 else:
@@ -2089,13 +2118,13 @@ class Index:
                 raise Exception(f"Orders in unknown state.")
 
         def fetch_orderbook_if_needed(
-                data_class=shared_data, refresh_needed: bool = False
+            data_class=shared_data, refresh_needed: bool = False
         ):
             if data_class is None or refresh_needed:
                 return fetch_book("orderbook")
             if (
-                    currenttime() - data_class.updated_time < timedelta(seconds=15)
-                    and data_class.orderbook_data is not None
+                currenttime() - data_class.updated_time < timedelta(seconds=15)
+                and data_class.orderbook_data is not None
             ):
                 return data_class.orderbook_data
             return fetch_book("orderbook")
@@ -2153,7 +2182,7 @@ class Index:
                     price_spike = present_price / ideal_price
 
                     if movement_from_entry < safeguard_movement and (
-                            iv_spike > safeguard_spike or price_spike > safeguard_spike
+                        iv_spike > safeguard_spike or price_spike > safeguard_spike
                     ):
                         notifier(
                             f"{self.name} {side.capitalize()} stoploss triggered without much "
@@ -2219,13 +2248,13 @@ class Index:
             last_print_time = currenttime()
             print_interval = timedelta(seconds=10)
             while not check_exit_conditions(
-                    currenttime().time(),
-                    time(*exit_time),
-                    trend_sl_hit,
-                    self.intraday_straddle_forced_exit,
-                    take_profit_exit,
-                    not in_trade,
-                    force_exit
+                currenttime().time(),
+                time(*exit_time),
+                trend_sl_hit,
+                self.intraday_straddle_forced_exit,
+                take_profit_exit,
+                not in_trade,
+                force_exit,
             ):
                 if sl_type == "call":
                     trend_sl_hit = underlying_price < sl_price
@@ -2254,15 +2283,15 @@ class Index:
                 placeorder(symbol, token, qty * self.lot_size, "BUY", "MARKET")
 
         def process_sl_hit(
-                sl_type,
-                sl_dict,
-                sl_orders_complete,
-                symbol,
-                token,
-                other_symbol,
-                other_token,
-                other_stoploss_order_ids,
-                other_avg_price,
+            sl_type,
+            sl_dict,
+            sl_orders_complete,
+            symbol,
+            token,
+            other_symbol,
+            other_token,
+            other_stoploss_order_ids,
+            other_avg_price,
         ):
             nonlocal take_profit_exit, call_exit_price, put_exit_price
 
@@ -2303,12 +2332,12 @@ class Index:
 
             refresh = True
             while not check_exit_conditions(
-                    currenttime().time(),
-                    time(*exit_time),
-                    sl_dict[other_sl_type],
-                    self.intraday_straddle_forced_exit,
-                    take_profit_exit,
-                    force_exit,
+                currenttime().time(),
+                time(*exit_time),
+                sl_dict[other_sl_type],
+                self.intraday_straddle_forced_exit,
+                take_profit_exit,
+                force_exit,
             ):
                 sl_dict[other_sl_type], other_sl_orders_complete = check_sl_orders(
                     other_stoploss_order_ids, other_sl_type, refresh=refresh
@@ -2420,13 +2449,13 @@ class Index:
         sleep(2)
         # Monitoring begins here
         while not check_exit_conditions(
-                currenttime().time(),
-                time(*exit_time),
-                any(sl_hit_dict.values()),
-                self.intraday_straddle_forced_exit,
-                take_profit_exit,
-                ctb_trg,
-                force_exit,
+            currenttime().time(),
+            time(*exit_time),
+            any(sl_hit_dict.values()),
+            self.intraday_straddle_forced_exit,
+            take_profit_exit,
+            ctb_trg,
+            force_exit,
         ):
             try:
                 sl_hit_dict["call"], call_sl_orders_complete = check_sl_orders(
@@ -2480,7 +2509,7 @@ class Index:
                 quantity_in_lots,
                 call_strike=ctb_hedge.call_strike,
                 put_strike=ctb_hedge.put_strike,
-                order_tag=order_tag+" CTB",
+                order_tag=order_tag + " CTB",
             )
             cancel_pending_orders(call_stoploss_order_ids + put_stoploss_order_ids)
             notifier(f"{self.name}: Converted to butterfly", self.webhook_url)
@@ -2539,13 +2568,13 @@ class Index:
         in_trade = False
 
     def intraday_straddle_delta_hedged(
-            self,
-            quantity_in_lots,
-            exit_time=(15, 30),
-            websocket=None,
-            wait_for_equality=False,
-            delta_threshold=1,
-            **kwargs,
+        self,
+        quantity_in_lots,
+        exit_time=(15, 30),
+        websocket=None,
+        wait_for_equality=False,
+        delta_threshold=1,
+        **kwargs,
     ):
         # Finding equal strike
         (
@@ -2611,7 +2640,7 @@ class Index:
             ).tolist()
 
             position_df["total_quantity"] = (
-                    position_df["quantity"] + position_df["delta_quantity"]
+                position_df["quantity"] + position_df["delta_quantity"]
             )
             position_df["delta"] = position_df.delta * position_df.total_quantity
             position_df["gamma"] = position_df.gamma * position_df.total_quantity
@@ -2642,16 +2671,16 @@ class Index:
                         lots_to_sell * self.lot_size,
                     )
                     positions[synthetic_fut_call]["delta_quantity"] -= (
-                            lots_to_sell * self.lot_size
+                        lots_to_sell * self.lot_size
                     )
                     positions[synthetic_fut_put]["delta_quantity"] += (
-                            lots_to_sell * self.lot_size
+                        lots_to_sell * self.lot_size
                     )
 
                 else:  # We are short
                     lots_to_buy = round(abs(current_delta) / self.lot_size, 0)
                     notifier(
-                        f"Delta less than {-delta_threshold}. Buying {lots_to_buy} "
+                        f"Delta less than -{delta_threshold}. Buying {lots_to_buy} "
                         + f"synthetic futures to reduce delta.\n",
                         self.webhook_url,
                     )
@@ -2663,10 +2692,10 @@ class Index:
                         lots_to_buy * self.lot_size,
                     )
                     positions[synthetic_fut_call]["delta_quantity"] += (
-                            lots_to_buy * self.lot_size
+                        lots_to_buy * self.lot_size
                     )
                     positions[synthetic_fut_put]["delta_quantity"] -= (
-                            lots_to_buy * self.lot_size
+                        lots_to_buy * self.lot_size
                     )
 
             sleep(2)
@@ -2710,7 +2739,7 @@ class Index:
 
 class Stock(Index):
     def __init__(
-            self, name, webhook_url=None, websocket=None, spot_future_difference=0.06
+        self, name, webhook_url=None, websocket=None, spot_future_difference=0.06
     ):
         super().__init__(name, webhook_url, websocket, spot_future_difference)
 
@@ -2824,7 +2853,7 @@ def lookup_and_return(book, field_to_lookup, value_to_lookup, field_to_return):
                 )
                 for field, value in zip(field_to_lookup_, value_to_lookup_)
             )
-               and all(entry[field] != "" for field in field_to_lookup_)
+            and all(entry[field] != "" for field in field_to_lookup_)
         ]
 
         if len(bucket) == 0:
@@ -2833,8 +2862,8 @@ def lookup_and_return(book, field_to_lookup, value_to_lookup, field_to_return):
             return np.array(bucket)
 
     if not (
-            isinstance(field_to_lookup, (str, list))
-            and isinstance(value_to_lookup, (str, list))
+        isinstance(field_to_lookup, (str, list))
+        and isinstance(value_to_lookup, (str, list))
     ):
         raise ValueError(
             "Both 'field_to_lookup' and 'value_to_lookup' must be strings or lists."
@@ -2887,15 +2916,15 @@ def currenttime():
 
 
 def simulate_option_movement(
-        spot,
-        strike,
-        time_to_expiry,
-        flag,
-        simulated_move=0.2,
-        r=0.06,
-        vol=None,
-        price=None,
-        print_results=False,
+    spot,
+    strike,
+    time_to_expiry,
+    flag,
+    simulated_move=0.2,
+    r=0.06,
+    vol=None,
+    price=None,
+    print_results=False,
 ):
     if price is None and vol is None:
         raise ValueError("Either price or vol must be specified.")
@@ -2945,22 +2974,34 @@ def spot_price_from_future(future_price, interest_rate, time_to_future):
 
 
 def fetch_lot_size(name, expiry=None):
-
     if expiry is None:
         expiry_mask = scrips.expiry_formatted == scrips.expiry_formatted
     else:
         expiry_mask = scrips.expiry_formatted == expiry
-    return int(scrips.loc[(scrips.name == name) & (scrips.exch_seg == "NFO") &
-                          expiry_mask, "lotsize"].iloc[0])
+
+    filtered_df = scrips.loc[
+        (scrips.name == name) & (scrips.exch_seg == "NFO") & expiry_mask
+    ]
+    lot_sizes = filtered_df.lotsize.values
+
+    if len(set(lot_sizes)) > 1:
+        print(
+            f"Multiple lot sizes found for {name}. Using the closest expiry lot size."
+        )
+        filtered_df = filtered_df.sort_values("expiry_dt")
+        return filtered_df.lotsize.iloc[0]
+
+    else:
+        return lot_sizes[0]
 
 
 def get_base(name):
     strike_array = scrips.loc[
         (scrips.name == name) & (scrips.exch_seg == "NFO")
-        ].sort_values("expiry_dt")
+    ].sort_values("expiry_dt")
     closest_expiry = strike_array.expiry_dt.iloc[0]
     strike_array = (
-            strike_array.loc[strike_array.expiry_dt == closest_expiry]["strike"] / 100
+        strike_array.loc[strike_array.expiry_dt == closest_expiry]["strike"] / 100
     )
     strike_differences = np.diff(strike_array.sort_values().unique())
     values, counts = np.unique(strike_differences, return_counts=True)
@@ -2969,7 +3010,7 @@ def get_base(name):
 
 
 def fetch_symbol_token(
-        name=None, expiry=None, strike=None, option_type=None, tokens=None
+    name=None, expiry=None, strike=None, option_type=None, tokens=None
 ):
     """Fetches symbol & token for a given scrip name. Provide just a single world if
     you want to fetch the symbol & token for the cash segment. If you want to fetch the
@@ -3026,9 +3067,9 @@ def get_straddle_symbol_tokens(name, strike, expiry):
 
 def get_available_strikes(name, both_pairs=False):
     mask = (
-            (scrips.name == name)
-            & (scrips.exch_seg == "NFO")
-            & (scrips.instrumenttype.str.startswith("OPT"))
+        (scrips.name == name)
+        & (scrips.exch_seg == "NFO")
+        & (scrips.instrumenttype.str.startswith("OPT"))
     )
     filtered = scrips.loc[mask].copy()
     filtered["strike"] = filtered["strike"] / 100
@@ -3120,7 +3161,7 @@ def fetch_straddle_price(name, expiry, strike, return_total_price=False):
 
 
 def fetch_strangle_price(
-        name, expiry, call_strike, put_strike, return_total_price=False
+    name, expiry, call_strike, put_strike, return_total_price=False
 ):
     """Fetches the price of the strangle for a given name, expiry and strike. Expiry should be in the DDMMMYY format.
     If return_total_price is True, then the total price of the strangle is returned. If return_total_price is False,
@@ -3189,8 +3230,8 @@ def timetoexpiry(expiry, effective_time=False, in_days=False):
 
     expiry = datetime.strptime(expiry, "%d%b%y")
     time_to_expiry = (
-                             (expiry + pd.DateOffset(minutes=930)) - currenttime()
-                     ) / timedelta(days=365)
+        (expiry + pd.DateOffset(minutes=930)) - currenttime()
+    ) / timedelta(days=365)
 
     # Subtracting holidays and weekends
     if effective_time:
@@ -3241,10 +3282,10 @@ def calc_greeks(position_string, position_price, underlying_price):
     time_left = timetoexpiry(expiry)
 
     iv = (
-            bs.implied_volatility(
-                position_price, underlying_price, strike, time_left, 0.05, option_type
-            )
-            * 100
+        bs.implied_volatility(
+            position_price, underlying_price, strike, time_left, 0.05, option_type
+        )
+        * 100
     )
     delta = bs.delta(underlying_price, strike, time_left, 0.05, iv, option_type)
     gamma = bs.gamma(underlying_price, strike, time_left, 0.05, iv)
@@ -3271,10 +3312,10 @@ def charges(buy_premium, contract_size, num_contracts, freeze_quantity=None):
     gst_rate = 18 / 100
 
     buy_transaction_charges = (
-            buy_premium * contract_size * num_contracts * transaction_charge_rate
+        buy_premium * contract_size * num_contracts * transaction_charge_rate
     )
     sell_transaction_charges = (
-            buy_premium * contract_size * num_contracts * transaction_charge_rate
+        buy_premium * contract_size * num_contracts * transaction_charge_rate
     )
     stt_ctt = buy_premium * contract_size * num_contracts * stt_ctt_rate
 
@@ -3282,13 +3323,13 @@ def charges(buy_premium, contract_size, num_contracts, freeze_quantity=None):
     sell_gst = (sell_brokerage + sell_transaction_charges) * gst_rate
 
     total_charges = (
-            buy_brokerage
-            + sell_brokerage
-            + buy_transaction_charges
-            + sell_transaction_charges
-            + stt_ctt
-            + buy_gst
-            + sell_gst
+        buy_brokerage
+        + sell_brokerage
+        + buy_transaction_charges
+        + sell_transaction_charges
+        + stt_ctt
+        + buy_gst
+        + sell_gst
     )
     charges_per_share = total_charges / (num_contracts * contract_size)
 
@@ -3389,12 +3430,12 @@ def placeSLorder(symbol, token, qty, buyorsell, triggerprice, ordertag=""):
 
 
 def place_synthetic_fut_order(
-        name,
-        strike,
-        expiry,
-        buy_or_sell,
-        quantity_in_shares,
-        prices: str | tuple = "MARKET",
+    name,
+    strike,
+    expiry,
+    buy_or_sell,
+    quantity_in_shares,
+    prices: str | tuple = "MARKET",
 ):
     """Places a synthetic future order. Quantity is in number of shares."""
 
