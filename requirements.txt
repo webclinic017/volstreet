@@ -13,4 +13,3 @@ discord.py~=2.2.2
 fuzzywuzzy~=0.18.0
 python-Levenshtein~=0.21.0
 eod~=0.2.1
-bdateutil~=0.1

@@ -1,7 +1,7 @@
 import autotrader.autotradingfunctions as atf
 from eod import EodHistoricalData
 import pandas as pd
-from bdateutil import relativedelta, MO, TU, WE, TH, FR
+from dateutil.relativedelta import relativedelta, MO, TU, WE, TH, FR
 import numpy as np
 
 
