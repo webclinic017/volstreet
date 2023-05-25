@@ -1,3 +1,4 @@
+import autotrader.autotradingfunctions as atf
 from eod import EodHistoricalData
 import pandas as pd
 from bdateutil import relativedelta, MO, TU, WE, TH, FR
@@ -62,7 +63,7 @@ def analyser(df, frequency=None, date_filter=None, _print=False):
     else:
         dates = date_filter.split("to")
         if len(dates) > 1:
-            df = df.loc[dates[0] : dates[1]]
+            df = df.loc[dates[0]: dates[1]]
         else:
             df = df.loc[dates[0]]
 
@@ -145,7 +146,7 @@ def get_recent_vol(df, periods=None, ignore_last=1):
 
 
 def get_multiple_recent_vol(
-    list_of_symbols, frequency, periods=None, ignore_last=1, client=None
+        list_of_symbols, frequency, periods=None, ignore_last=1, client=None
 ):
     if client is None:
         client = DataClient(api_key=__import__("os").environ.get("EOD_API_KEY"))
@@ -200,7 +201,7 @@ def generate_streak(df, query):
     _bool = df.query(f"{query}")
     df["result"] = df.index.isin(_bool.index)
     df["start_of_streak"] = (df["result"].ne(df["result"].shift())) & (
-        df["result"] == True
+            df["result"] == True
     )
     df["streak_id"] = df.start_of_streak.cumsum()
     df.loc[df["result"] == False, "streak_id"] = np.nan
@@ -280,3 +281,32 @@ def gambler(instrument, freq, query):
         .sort_values("longest_streak", ascending=False)
         .reset_index(drop=True)
     )
+
+
+def get_index_vs_constituents_recent_vols(index_symbol):
+
+    index = atf.Index(index_symbol)
+    constituents, weights = index.get_constituents(cutoff_pct=90)
+    weights = [w / sum(weights) for w in weights]
+
+    dc = DataClient(api_key=__import__('os').environ['EOD_API_KEY'])
+
+    index_data = dc.get_data(symbol=index_symbol)
+    index_monthly_data = analyser(index_data, frequency='M-THU')
+    index_monthly_abs_change = index_monthly_data['abs_change'].to_frame()
+
+    for i, constituent in enumerate(constituents):
+        constituent_data = dc.get_data(symbol=constituent)
+        constituent_monthly_data = analyser(constituent_data, frequency='M-THU')
+        constituent_monthly_abs_change = constituent_monthly_data['abs_change']
+        constituent_monthly_abs_change_weighted = constituent_monthly_abs_change * (weights[i])
+        index_monthly_abs_change = index_monthly_abs_change.merge(constituent_monthly_abs_change_weighted, on='date',
+                                                                  how='inner', suffixes=('', f'_{constituent}'))
+
+    index_monthly_abs_change['sum_constituent_movement'] = index_monthly_abs_change.iloc[:, 1:].sum(axis=1)
+    index_monthly_abs_change['index_movement'] = index_monthly_data['abs_change']
+    index_monthly_abs_change['ratio_of_movements'] = index_monthly_abs_change['sum_constituent_movement'] / \
+                                                     index_monthly_abs_change['index_movement']
+    summary_df = index_monthly_abs_change[['index_movement', 'sum_constituent_movement', 'ratio_of_movements']]
+    summary_df.columns = ['index', 'constituents', 'ratio']
+    return summary_df

@@ -12,8 +12,8 @@ nifty_monthly_data = dm.analyser(nifty_data, frequency='M-THU')
 bnf_monthly_data = dm.analyser(bnf_data, frequency='M-THU')
 # %%
 # Using ratio_analysis function
-ratio_data = dm.ratio_analysis(bnf_weekly_data, nifty_weekly_data, periods_to_avg=9, return_summary=True)
-
+ratio_data = dm.ratio_analysis(bnf_weekly_data, nifty_weekly_data, periods_to_avg=5, return_summary=True)
+#%%
 # Using generate_streak function
 bnf2 = dm.generate_streak(bnf_weekly_data, 'abs_change < 2')
 # %%

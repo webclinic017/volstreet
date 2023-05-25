@@ -1027,6 +1027,10 @@ class Index:
             self.available_straddle_strikes = available_strikes
         return available_strikes
 
+    def get_constituents(self, cutoff_pct=101):
+        tickers, weights = get_index_constituents(self.name, cutoff_pct)
+        return tickers, weights
+
     def log_order(self, strike, expiry, buy_or_sell, call_price, put_price, order_tag):
         dict_format = {
             "Date": currenttime().strftime("%d-%m-%Y %H:%M:%S"),
@@ -1723,7 +1727,7 @@ class Index:
         order_tag = "Intraday straddle"
         strategy_id = currenttime().strftime("%d%m%y%H%M%S%f")
         expiry = self.current_expiry
-        sleep_interval = 3 if shared_data is None and not take_profit else 0
+        sleep_interval = 0 if take_profit else 5
 
         # Splicing orders
         spliced_orders = self.splice_orders(quantity_in_lots)
@@ -2061,6 +2065,9 @@ class Index:
 
             statuses = lookup_and_return(order_book, "orderid", order_ids, "status")
 
+            if isinstance(statuses, (int, np.int32, np.int64)):
+                logger1.error(f'Statuses is {statuses} for orderid(s) {order_ids}')
+
             if all(statuses == pending_text):
                 return False, False
 
@@ -2331,6 +2338,7 @@ class Index:
             # notifier(f'{self.name} {sl_type} stoploss triggered and completed.', self.webhook_url)
 
             refresh = True
+            sleep(5)
             while not check_exit_conditions(
                 currenttime().time(),
                 time(*exit_time),
@@ -2443,10 +2451,10 @@ class Index:
         # Setting up stop loss dictionary and starting price thread
         sl_hit_dict = {"call": False, "put": False}
         price_updater = Thread(target=price_tracker)
-        price_updater.start()
-        refresh_orderbook = True
 
-        sleep(2)
+        sleep(5)
+        refresh_orderbook = True
+        price_updater.start()
         # Monitoring begins here
         while not check_exit_conditions(
             currenttime().time(),
@@ -2537,8 +2545,6 @@ class Index:
 
         if isinstance(pending_order_ids, (str, np.ndarray)):
             cancel_pending_orders(pending_order_ids)
-        else:
-            logger1.error(f"{self.name}: Invalid pending order ids {pending_order_ids}")
 
         # Exit price information
         c_exit_price = call_exit_price if sl_hit_call else call_price
@@ -3297,6 +3303,23 @@ def get_current_vix():
     vix = yf.Ticker("^INDIAVIX")
     vix = vix.fast_info["last_price"]
     return vix
+
+
+def get_index_constituents(index_symbol, cutoff_pct=101):
+    # Fetch and filter constituents
+    constituents = (
+        pd.read_csv(f"autotrader/{index_symbol}_constituents.csv")
+        .sort_values("Index weight", ascending=False)
+        .assign(cum_weight=lambda df: df["Index weight"].cumsum())
+        .loc[lambda df: df.cum_weight < cutoff_pct]
+    )
+
+    constituent_tickers, constituent_weights = (
+        constituents.Ticker.to_list(),
+        constituents["Index weight"].to_list(),
+    )
+
+    return constituent_tickers, constituent_weights
 
 
 def charges(buy_premium, contract_size, num_contracts, freeze_quantity=None):

@@ -3,7 +3,6 @@ import autotrader.datamodule as dm
 import threading
 from datetime import time
 from time import sleep
-import pandas as pd
 
 
 def get_user_data(client, user, pin, apikey, authkey, webhook_url):
@@ -272,18 +271,8 @@ def index_vs_constituents(
     )
     expirys = ("future", "current") if expirys is None else expirys
 
-    # Fetch and filter constituents
-    constituents = (
-        pd.read_csv(f"autotrader/{index_symbol}_constituents.csv")
-        .sort_values("Index weight", ascending=False)
-        .assign(cum_weight=lambda df: df["Index weight"].cumsum())
-        .loc[lambda df: df.cum_weight < cutoff_pct]
-    )
-
-    constituent_tickers, constituent_weights = (
-        constituents.Ticker.to_list(),
-        constituents["Index weight"].to_list(),
-    )
+    # Fetch constituents
+    constituent_tickers, constituent_weights = atf.get_index_constituents(index_symbol, cutoff_pct)
     total_weight, number_of_stocks = sum(constituent_weights), len(constituent_tickers)
     percent_weights = [weight / total_weight for weight in constituent_weights]
     total_exposure = exposure_per_stock * number_of_stocks
@@ -362,7 +351,7 @@ def index_vs_constituents(
     recent_vols = dm.get_multiple_recent_vol(
         [index_symbol] + constituent_tickers,
         frequency="M-THU",
-        periods=[2, 5, 7],
+        periods=[2, 5, 7, 10, 15, 20],
         ignore_last=ignore_last,
     )
     period_vol_dict = {
