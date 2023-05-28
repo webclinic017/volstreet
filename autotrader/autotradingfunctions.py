@@ -1994,6 +1994,7 @@ class Index:
                 if (
                     smart_exit
                     and (callsl or putsl)
+                    and not (callsl and putsl)
                     and (call_iv or put_iv)
                     and not smart_exit_notification_sent
                 ):

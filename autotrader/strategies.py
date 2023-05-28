@@ -198,11 +198,14 @@ def intraday_trend_on_nifty(
     scan_end_time = atf.datetime.combine(atf.currenttime().date(), exit_time)
     scan_end_time = scan_end_time - atf.timedelta(minutes=10)
     scan_end_time = scan_end_time.time()
+    upper_limit = nifty_open_price * (1 + threshold_movement / 100)
+    lower_limit = nifty_open_price * (1 - threshold_movement / 100)
 
     atf.notifier(
-        f"Nifty trender starting with {threshold_movement:0.2f} threshold.",
-        discord_webhook_url,
-    )
+        f"Nifty trender starting with {threshold_movement:0.2f} threshold movement\n"
+        f"Current Price: {nifty_open_price}\nUpper limit: {upper_limit:0.2f}\n"
+        f"Lower limit: {lower_limit:0.2f}.",
+        discord_webhook_url)
     last_printed_time = atf.currenttime()
     while (
         abs(movement) < threshold_movement and atf.currenttime().time() < scan_end_time
@@ -250,9 +253,9 @@ def intraday_trend_on_nifty(
         prices="LIMIT",
         check_status=True,
     )
-    stop_loss_message = "Stop loss hit." if stop_loss_hit else ""
+    stop_loss_message = "Trender stop loss hit. " if stop_loss_hit else ""
     atf.notifier(
-        f"Nifty trender exited. Nifty at {nifty.fetch_ltp()}. {stop_loss_message}",
+        f"{stop_loss_message}Nifty trender exited. Nifty at {nifty.fetch_ltp()}.",
         discord_webhook_url,
     )
 
@@ -287,8 +290,8 @@ def index_vs_constituents(
     index_premium_value = index_info["total_price"] * index_shares
     index_break_even_points = (index_info["underlying_price"],)
     index_break_even_points += (
-        index_info["call_strike"] + index_info["call_price"],
-        index_info["put_strike"] - index_info["put_price"],
+        index_info["call_strike"] + index_info["total_price"],
+        index_info["put_strike"] - index_info["total_price"],
     )
 
     # Calculate movements to break even
