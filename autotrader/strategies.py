@@ -205,7 +205,8 @@ def intraday_trend_on_nifty(
         f"Nifty trender starting with {threshold_movement:0.2f} threshold movement\n"
         f"Current Price: {nifty_open_price}\nUpper limit: {upper_limit:0.2f}\n"
         f"Lower limit: {lower_limit:0.2f}.",
-        discord_webhook_url)
+        discord_webhook_url,
+    )
     last_printed_time = atf.currenttime()
     while (
         abs(movement) < threshold_movement and atf.currenttime().time() < scan_end_time
@@ -275,7 +276,9 @@ def index_vs_constituents(
     expirys = ("future", "current") if expirys is None else expirys
 
     # Fetch constituents
-    constituent_tickers, constituent_weights = atf.get_index_constituents(index_symbol, cutoff_pct)
+    constituent_tickers, constituent_weights = atf.get_index_constituents(
+        index_symbol, cutoff_pct
+    )
     total_weight, number_of_stocks = sum(constituent_weights), len(constituent_tickers)
     percent_weights = [weight / total_weight for weight in constituent_weights]
     total_exposure = exposure_per_stock * number_of_stocks

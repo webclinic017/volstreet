@@ -63,7 +63,7 @@ def analyser(df, frequency=None, date_filter=None, _print=False):
     else:
         dates = date_filter.split("to")
         if len(dates) > 1:
-            df = df.loc[dates[0]: dates[1]]
+            df = df.loc[dates[0] : dates[1]]
         else:
             df = df.loc[dates[0]]
 
@@ -146,7 +146,7 @@ def get_recent_vol(df, periods=None, ignore_last=1):
 
 
 def get_multiple_recent_vol(
-        list_of_symbols, frequency, periods=None, ignore_last=1, client=None
+    list_of_symbols, frequency, periods=None, ignore_last=1, client=None
 ):
     if client is None:
         client = DataClient(api_key=__import__("os").environ.get("EOD_API_KEY"))
@@ -201,7 +201,7 @@ def generate_streak(df, query):
     _bool = df.query(f"{query}")
     df["result"] = df.index.isin(_bool.index)
     df["start_of_streak"] = (df["result"].ne(df["result"].shift())) & (
-            df["result"] == True
+        df["result"] == True
     )
     df["streak_id"] = df.start_of_streak.cumsum()
     df.loc[df["result"] == False, "streak_id"] = np.nan
@@ -283,30 +283,168 @@ def gambler(instrument, freq, query):
     )
 
 
-def get_index_vs_constituents_recent_vols(index_symbol):
+def compute_strike_and_premium(
+    close: pd.Series,
+    iv: pd.Series,
+    time_to_expiry: pd.Series,
+    strike_offset: float,
+    base: float = 100,
+    label: str = "",
+    transaction="buy",
+):
+    if label:
+        label = f"{label}_"
 
+    data = pd.DataFrame(
+        {
+            "close": close,
+            "iv": iv,
+            "time_to_expiry": time_to_expiry,
+        }
+    )
+
+    data["call_strike"] = data["close"].apply(
+        lambda x: atf.findstrike(x * (1 + strike_offset), base)
+    )
+    data["put_strike"] = data["close"].apply(
+        lambda x: atf.findstrike(x * (1 - strike_offset), base)
+    )
+    data["outcome_spot"] = data["close"].shift(-1)
+    data["initial_premium"] = data.apply(
+        lambda row: atf.calc_combined_premium(
+            row.close,
+            row.iv / 100,
+            row.time_to_expiry,
+            callstrike=row.call_strike,
+            putstrike=row.put_strike,
+        ),
+        axis=1,
+    )
+    data["outcome_premium"] = data.apply(
+        lambda row: atf.calc_combined_premium(
+            row.outcome_spot,
+            row.iv / 100,
+            0,
+            callstrike=row.call_strike,
+            putstrike=row.put_strike,
+        ),
+        axis=1,
+    )
+    data["payoff"] = (
+        data["initial_premium"] - data["outcome_premium"]
+        if transaction == "sell"
+        else data["outcome_premium"] - data["initial_premium"]
+    )
+    data["payoff"] = data["payoff"].shift(1)
+    data["payoff_pct"] = data["payoff"] / data["close"]
+    data = data[
+        [
+            "call_strike",
+            "put_strike",
+            "initial_premium",
+            "outcome_premium",
+            "payoff",
+            "payoff_pct",
+        ]
+    ]
+    data.columns = [f"{label}{col}" for col in data.columns]
+    return data
+
+
+def get_index_vs_constituents_recent_vols(
+    index_symbol, return_all=False, simulate_backtest=False, strike_offset=0
+):
     index = atf.Index(index_symbol)
     constituents, weights = index.get_constituents(cutoff_pct=90)
     weights = [w / sum(weights) for w in weights]
 
-    dc = DataClient(api_key=__import__('os').environ['EOD_API_KEY'])
+    dc = DataClient(api_key=__import__("os").environ["EOD_API_KEY"])
 
     index_data = dc.get_data(symbol=index_symbol)
-    index_monthly_data = analyser(index_data, frequency='M-THU')
-    index_monthly_abs_change = index_monthly_data['abs_change'].to_frame()
+    index_monthly_data = analyser(index_data, frequency="M-THU")
+    index_monthly_data = index_monthly_data[["close", "abs_change"]]
+    index_monthly_data.columns = ["index_close", "index_abs_change"]
+
+    if simulate_backtest:
+        if index_symbol == "BANKNIFTY":
+            index_ivs = pd.read_csv(
+                "BANKNIFTY_IV_DATA.csv",
+                parse_dates=True,
+                index_col="date",
+                dayfirst=True,
+            )
+            index_ivs.index = pd.to_datetime(index_ivs.index)
+            index_ivs = index_ivs.resample("D").ffill()
+            index_monthly_data = index_monthly_data.merge(
+                index_ivs, left_index=True, right_index=True, how="left"
+            )
+            index_monthly_data["index_iv"] = index_monthly_data["close"].fillna(
+                method="ffill"
+            )
+            index_monthly_data.drop(columns=["close"], inplace=True)
+            index_monthly_data["iv_diff_from_mean"] = (
+                index_monthly_data["index_iv"] / index_monthly_data["index_iv"].mean()
+            )
+            index_monthly_data["time_to_expiry"] = (
+                index_monthly_data.index.to_series().diff().dt.days / 365
+            )
+            simulated_data = compute_strike_and_premium(
+                index_monthly_data["index_close"],
+                index_monthly_data["index_iv"],
+                index_monthly_data["time_to_expiry"],
+                strike_offset,
+                100,
+                label="index",
+            )
+            index_monthly_data = index_monthly_data.merge(
+                simulated_data, left_index=True, right_index=True, how="left"
+            )
+        else:
+            raise NotImplementedError
 
     for i, constituent in enumerate(constituents):
         constituent_data = dc.get_data(symbol=constituent)
-        constituent_monthly_data = analyser(constituent_data, frequency='M-THU')
-        constituent_monthly_abs_change = constituent_monthly_data['abs_change']
-        constituent_monthly_abs_change_weighted = constituent_monthly_abs_change * (weights[i])
-        index_monthly_abs_change = index_monthly_abs_change.merge(constituent_monthly_abs_change_weighted, on='date',
-                                                                  how='inner', suffixes=('', f'_{constituent}'))
+        constituent_monthly_data = analyser(constituent_data, frequency="M-THU")
+        constituent_monthly_data = constituent_monthly_data[["close", "abs_change"]]
+        constituent_monthly_data.columns = [
+            f"{constituent}_close",
+            f"{constituent}_abs_change",
+        ]
+        constituent_monthly_data[f"{constituent}_abs_change_weighted"] = (
+            constituent_monthly_data[f"{constituent}_abs_change"] * weights[i]
+        )
 
-    index_monthly_abs_change['sum_constituent_movement'] = index_monthly_abs_change.iloc[:, 1:].sum(axis=1)
-    index_monthly_abs_change['index_movement'] = index_monthly_data['abs_change']
-    index_monthly_abs_change['ratio_of_movements'] = index_monthly_abs_change['sum_constituent_movement'] / \
-                                                     index_monthly_abs_change['index_movement']
-    summary_df = index_monthly_abs_change[['index_movement', 'sum_constituent_movement', 'ratio_of_movements']]
-    summary_df.columns = ['index', 'constituents', 'ratio']
-    return summary_df
+        index_monthly_data = index_monthly_data.merge(
+            constituent_monthly_data, left_index=True, right_index=True, how="inner"
+        )
+        if simulate_backtest:
+            index_monthly_data[f"{constituent}_iv"] = index_monthly_data[
+                "iv_diff_from_mean"
+            ] * (
+                (index_monthly_data[f"{constituent}_abs_change"].mean() - 0.5) * 4.4
+            )  # 0.5 is the adjustment factor for the mean to account for splits
+            simulated_data = compute_strike_and_premium(
+                index_monthly_data[f"{constituent}_close"],
+                index_monthly_data[f"{constituent}_iv"],
+                index_monthly_data["time_to_expiry"],
+                strike_offset,
+                5,
+                label=constituent,
+            )
+            index_monthly_data = index_monthly_data.merge(
+                simulated_data, left_index=True, right_index=True, how="left"
+            )
+    index_monthly_data["sum_constituent_movement"] = index_monthly_data.filter(
+        regex="weighted"
+    ).sum(axis=1)
+    index_monthly_data["ratio_of_movements"] = (
+        index_monthly_data["sum_constituent_movement"]
+        / index_monthly_data["index_abs_change"]
+    )
+    if return_all:
+        return index_monthly_data
+    else:
+        summary_df = index_monthly_data[
+            ["index_abs_change", "sum_constituent_movement", "ratio_of_movements"]
+        ]
+        return summary_df

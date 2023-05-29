@@ -2067,7 +2067,7 @@ class Index:
             statuses = lookup_and_return(order_book, "orderid", order_ids, "status")
 
             if isinstance(statuses, (int, np.int32, np.int64)):
-                logger1.error(f'Statuses is {statuses} for orderid(s) {order_ids}')
+                logger1.error(f"Statuses is {statuses} for orderid(s) {order_ids}")
 
             if all(statuses == pending_text):
                 return False, False
@@ -3279,6 +3279,31 @@ def strangle_iv(callprice, putprice, spot, callstrike, putstrike, timeleft):
         avg_iv = call_iv if put_iv is None else put_iv
 
     return call_iv, put_iv, avg_iv
+
+
+def calc_combined_premium(
+    spot, iv, time_left, strike=None, callstrike=None, putstrike=None
+):
+    if strike is None and (callstrike is None or putstrike is None):
+        raise Exception("Either strike or callstrike and putstrike must be provided")
+
+    if strike is not None and (callstrike is not None or putstrike is not None):
+        raise Exception(
+            "Strike Provided as well as callstrike and putstrike. Please provide only one of them"
+        )
+
+    if strike is not None:
+        callstrike = strike
+        putstrike = strike
+
+    if time_left > 0:
+        callprice = bs.call(spot, callstrike, time_left, 0.05, iv)
+        putprice = bs.put(spot, putstrike, time_left, 0.05, iv)
+        return callprice + putprice
+    else:
+        callpayoff = max(0, spot - callstrike)
+        putpayoff = max(0, putstrike - spot)
+        return callpayoff + putpayoff
 
 
 def calc_greeks(position_string, position_price, underlying_price):
