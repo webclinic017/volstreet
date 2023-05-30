@@ -63,7 +63,7 @@ def analyser(df, frequency=None, date_filter=None, _print=False):
     else:
         dates = date_filter.split("to")
         if len(dates) > 1:
-            df = df.loc[dates[0] : dates[1]]
+            df = df.loc[dates[0]: dates[1]]
         else:
             df = df.loc[dates[0]]
 
@@ -258,7 +258,8 @@ def gambler(instrument, freq, query):
 
     def print_streak_summary(streak_summary):
         print(
-            f"{streak_summary['freq']} - longest streak: {streak_summary['longest_streak']} from {streak_summary['longest_streak_start']:%d %b %Y} to {streak_summary['longest_streak_end']:%d %b %Y}"
+            f"{streak_summary['freq']} - longest streak: {streak_summary['longest_streak']} "
+            f"from {streak_summary['longest_streak_start']:%d %b %Y} to {streak_summary['longest_streak_end']:%d %b %Y}"
         )
         if streak_summary["current_streak"]:
             print(f"Current streak: {streak_summary['current_streak']}\n")
@@ -283,17 +284,23 @@ def gambler(instrument, freq, query):
     )
 
 
-def compute_strike_and_premium(
+def simulate_strike_premium_payoff(
     close: pd.Series,
     iv: pd.Series,
     time_to_expiry: pd.Series,
     strike_offset: float,
     base: float = 100,
     label: str = "",
-    transaction="buy",
+    action="buy",
 ):
+
     if label:
         label = f"{label}_"
+
+    action = action.lower()
+
+    if action not in ["buy", "sell"]:
+        raise ValueError("action must be either 'buy' or 'sell'")
 
     data = pd.DataFrame(
         {
@@ -332,7 +339,7 @@ def compute_strike_and_premium(
     )
     data["payoff"] = (
         data["initial_premium"] - data["outcome_premium"]
-        if transaction == "sell"
+        if action == "sell"
         else data["outcome_premium"] - data["initial_premium"]
     )
     data["payoff"] = data["payoff"].shift(1)
@@ -352,8 +359,20 @@ def compute_strike_and_premium(
 
 
 def get_index_vs_constituents_recent_vols(
-    index_symbol, return_all=False, simulate_backtest=False, strike_offset=0
+    index_symbol,
+    return_all=False,
+    simulate_backtest=False,
+    strike_offset=0,
+    hedge_offset=0,
+    stock_vix_adjustment=0.7,
+    index_action="sell"
 ):
+    """
+    Get the recent volatility of the index and its constituents
+    """
+    if return_all is False:
+        simulate_backtest = False
+
     index = atf.Index(index_symbol)
     constituents, weights = index.get_constituents(cutoff_pct=90)
     weights = [w / sum(weights) for w in weights]
@@ -388,20 +407,43 @@ def get_index_vs_constituents_recent_vols(
             index_monthly_data["time_to_expiry"] = (
                 index_monthly_data.index.to_series().diff().dt.days / 365
             )
-            simulated_data = compute_strike_and_premium(
-                index_monthly_data["index_close"],
-                index_monthly_data["index_iv"],
-                index_monthly_data["time_to_expiry"],
-                strike_offset,
-                100,
-                label="index",
-            )
+
+            index_hedge_action = "buy" if index_action == "sell" else "sell"
+
+            # The main strike
+            simulated_data = simulate_strike_premium_payoff(index_monthly_data["index_close"],
+                                                            index_monthly_data["index_iv"],
+                                                            index_monthly_data["time_to_expiry"], strike_offset, 100,
+                                                            label="index", action=index_action)
             index_monthly_data = index_monthly_data.merge(
                 simulated_data, left_index=True, right_index=True, how="left"
             )
+
+            index_monthly_data["index_initial_premium_pct"] = (
+                    index_monthly_data["index_initial_premium"] / index_monthly_data["index_close"]
+            )
+
+            # The hedge strike
+            simulated_data = simulate_strike_premium_payoff(index_monthly_data["index_close"],
+                                                            index_monthly_data["index_iv"],
+                                                            index_monthly_data["time_to_expiry"], hedge_offset, 100,
+                                                            label="index_hedge", action=index_hedge_action)
+
+            index_monthly_data = index_monthly_data.merge(simulated_data, left_index=True, right_index=True, how="left")
+
+            index_monthly_data["index_hedge_initial_premium_pct"] = (
+                    index_monthly_data["index_hedge_initial_premium"] / index_monthly_data["index_close"]
+            )
+
+            index_monthly_data["index_bep_pct"] = (
+                    index_monthly_data["index_initial_premium_pct"] -
+                    index_monthly_data["index_hedge_initial_premium_pct"]
+            )
+
         else:
             raise NotImplementedError
 
+    constituent_dfs = []
     for i, constituent in enumerate(constituents):
         constituent_data = dc.get_data(symbol=constituent)
         constituent_monthly_data = analyser(constituent_data, frequency="M-THU")
@@ -414,33 +456,91 @@ def get_index_vs_constituents_recent_vols(
             constituent_monthly_data[f"{constituent}_abs_change"] * weights[i]
         )
 
-        index_monthly_data = index_monthly_data.merge(
-            constituent_monthly_data, left_index=True, right_index=True, how="inner"
-        )
         if simulate_backtest:
-            index_monthly_data[f"{constituent}_iv"] = index_monthly_data[
+            constituent_monthly_data[f"{constituent}_iv"] = index_monthly_data[
                 "iv_diff_from_mean"
             ] * (
-                (index_monthly_data[f"{constituent}_abs_change"].mean() - 0.5) * 4.4
-            )  # 0.5 is the adjustment factor for the mean to account for splits
-            simulated_data = compute_strike_and_premium(
-                index_monthly_data[f"{constituent}_close"],
-                index_monthly_data[f"{constituent}_iv"],
-                index_monthly_data["time_to_expiry"],
-                strike_offset,
-                5,
-                label=constituent,
-            )
-            index_monthly_data = index_monthly_data.merge(
+                (constituent_monthly_data[f"{constituent}_abs_change"].mean() - stock_vix_adjustment) * 4.4
+            )  # the adjustment factor is to account for the spurious volatility on account of splits
+
+            constituent_action = "buy" if index_action == "sell" else "sell"
+            constituent_hedge_action = "sell" if constituent_action == "buy" else "sell"
+
+            # The main strike
+            simulated_data = simulate_strike_premium_payoff(constituent_monthly_data[f"{constituent}_close"],
+                                                            constituent_monthly_data[f"{constituent}_iv"],
+                                                            index_monthly_data["time_to_expiry"], strike_offset, 5,
+                                                            label=constituent, action=constituent_action)
+            constituent_monthly_data = constituent_monthly_data.merge(
                 simulated_data, left_index=True, right_index=True, how="left"
             )
+
+            constituent_monthly_data[f"{constituent}_initial_premium_pct"] = (
+                constituent_monthly_data[f"{constituent}_initial_premium"] /
+                constituent_monthly_data[f"{constituent}_close"]
+            )
+
+            # The hedge strike
+            simulated_data = simulate_strike_premium_payoff(constituent_monthly_data[f"{constituent}_close"],
+                                                            constituent_monthly_data[f"{constituent}_iv"],
+                                                            index_monthly_data["time_to_expiry"], hedge_offset, 5,
+                                                            label=f'{constituent}_hedge',
+                                                            action=constituent_hedge_action)
+            constituent_monthly_data = constituent_monthly_data.merge(
+                simulated_data, left_index=True, right_index=True, how="left"
+            )
+
+            constituent_monthly_data[f"{constituent}_hedge_initial_premium_pct"] = (
+                constituent_monthly_data[f"{constituent}_hedge_initial_premium"] /
+                constituent_monthly_data[f"{constituent}_close"]
+            )
+
+            constituent_monthly_data[f"{constituent}_bep_pct"] = (
+                constituent_monthly_data[f"{constituent}_initial_premium_pct"]
+                - constituent_monthly_data[f"{constituent}_hedge_initial_premium_pct"]
+            )
+
+            constituent_monthly_data[f"{constituent}_total_payoff"] = (
+                constituent_monthly_data[f"{constituent}_payoff"]
+                + constituent_monthly_data[f"{constituent}_hedge_payoff"]
+            )
+            constituent_monthly_data[f"{constituent}_total_payoff_pct"] = (
+                constituent_monthly_data[f"{constituent}_total_payoff"] /
+                constituent_monthly_data[f"{constituent}_close"]
+            )
+            constituent_monthly_data[f"{constituent}_total_payoff_pct_weighted"] = (
+                constituent_monthly_data[f"{constituent}_total_payoff_pct"] * weights[i]
+            )
+
+        constituent_dfs.append(constituent_monthly_data)
+
+    index_monthly_data = index_monthly_data.merge(
+        pd.concat(constituent_dfs, axis=1), left_index=True, right_index=True, how="inner"
+    )
+    index_monthly_data = index_monthly_data.copy()
     index_monthly_data["sum_constituent_movement"] = index_monthly_data.filter(
-        regex="weighted"
+        regex="abs_change_weighted"
     ).sum(axis=1)
     index_monthly_data["ratio_of_movements"] = (
         index_monthly_data["sum_constituent_movement"]
         / index_monthly_data["index_abs_change"]
     )
+
+    if simulate_backtest:
+        index_monthly_data["index_total_payoff"] = (
+                index_monthly_data["index_payoff"] + index_monthly_data["index_hedge_payoff"]
+        )
+        index_monthly_data["index_total_payoff_pct"] = (
+                index_monthly_data["index_total_payoff"] / index_monthly_data["index_close"]
+        )
+        index_monthly_data["sum_constituent_payoff_pct"] = index_monthly_data.filter(
+            regex="total_payoff_pct_weighted"
+        ).sum(axis=1)
+
+        index_monthly_data['total_combined_payoff_pct'] = (
+                index_monthly_data["index_total_payoff_pct"] + index_monthly_data["sum_constituent_payoff_pct"]
+        )
+
     if return_all:
         return index_monthly_data
     else:

@@ -158,6 +158,7 @@ def overnight_straddle_nifty(
         atf.notifier(f"Appending data failed: {e}", discord_webhook_url)
 
 
+@atf.log_errors
 def intraday_trend_on_nifty(
     quantity_in_lots,
     client=None,
@@ -291,7 +292,7 @@ def index_vs_constituents(
         int(total_exposure / (index.fetch_ltp() * index.lot_size)) * index.lot_size,
     )
     index_premium_value = index_info["total_price"] * index_shares
-    index_break_even_points = (index_info["underlying_price"],)
+    index_break_even_points = (index_info["underlying_price"], index_info["call_strike"], index_info["put_strike"])
     index_break_even_points += (
         index_info["call_strike"] + index_info["total_price"],
         index_info["put_strike"] - index_info["total_price"],
@@ -329,6 +330,8 @@ def index_vs_constituents(
     break_even_points_per_stock = [
         (
             info["underlying_price"],
+            info["call_strike"],
+            info["put_strike"],
             info["call_strike"] + premium,
             info["put_strike"] - premium,
         )
@@ -339,6 +342,8 @@ def index_vs_constituents(
             bep[0],
             bep[1],
             bep[2],
+            bep[3],
+            bep[4],
             _return_abs_movement(info["underlying_price"], bep[1]),
             _return_abs_movement(info["underlying_price"], bep[2]),
         )
