@@ -3354,6 +3354,31 @@ def get_index_constituents(index_symbol, cutoff_pct=101):
     return constituent_tickers, constituent_weights
 
 
+def convert_option_chains_to_df(option_chains, return_all=False):
+
+    symbol_dfs = []
+    for symbol in option_chains:
+        symbol_obj = Index(symbol)
+        spot_price = symbol_obj.fetch_ltp()
+        expiry_dfs = []
+        for expiry in option_chains[symbol]:
+            df = pd.DataFrame(option_chains[symbol][expiry]).T
+            df.index = df.index.set_names('strike')
+            df = df.reset_index()
+            df['spot'] = spot_price
+            df['expiry'] = expiry
+            df['symbol'] = symbol
+            df['time_to_expiry'] = timetoexpiry(expiry)
+            expiry_dfs.append(df)
+        symbol_oc = pd.concat(expiry_dfs)
+        symbol_dfs.append(symbol_oc)
+
+    if return_all:
+        return pd.concat(symbol_dfs)
+    else:
+        return symbol_dfs
+
+
 def charges(buy_premium, contract_size, num_contracts, freeze_quantity=None):
     if freeze_quantity:
         number_of_orders = np.ceil(num_contracts / freeze_quantity)
