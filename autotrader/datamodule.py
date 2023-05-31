@@ -387,7 +387,7 @@ def get_index_vs_constituents_recent_vols(
     if simulate_backtest:
         if index_symbol == "BANKNIFTY":
             index_ivs = pd.read_csv(
-                "BANKNIFTY_IV_DATA.csv",
+                "data/banknifty_ivs.csv",
                 parse_dates=True,
                 index_col="date",
                 dayfirst=True,
