@@ -1,6 +1,8 @@
 import urllib
 import requests
 import pandas as pd
+import logging
+from datetime import datetime
 
 
 def get_ticker_file():
@@ -42,6 +44,25 @@ def get_symbols():
     return df
 
 
+def create_logger(name):
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    today = datetime.now().strftime("%Y-%m-%d")
+    info_log_filename = f"error-{today}.log"
+    info_handler = logging.FileHandler(info_log_filename)
+    formatter = logging.Formatter("%(asctime)s:%(levelname)s:%(message)s")
+    info_handler.setFormatter(formatter)
+    info_handler.setLevel(logging.INFO)
+    logger.addHandler(info_handler)
+
+    error_log_filename = f"info-{today}.log"
+    error_handler = logging.FileHandler(error_log_filename)
+    error_handler.setFormatter(formatter)
+    error_handler.setLevel(logging.ERROR)
+    logger.addHandler(error_handler)
+    return logger
+
+
 scrips = get_ticker_file()
 holidays = fetch_holidays()
 symbol_df = get_symbols()
@@ -51,3 +72,5 @@ scrips["expiry_dt"] = pd.to_datetime(
 )
 scrips["expiry_formatted"] = scrips["expiry_dt"].dt.strftime("%d%b%y")
 scrips["expiry_formatted"] = scrips["expiry_formatted"].str.upper()
+
+logger = create_logger("autotrader")

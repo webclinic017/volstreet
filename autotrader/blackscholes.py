@@ -167,3 +167,69 @@ def main():
             "implied_volatility": ivs,
         }
     )
+
+
+def iv_curve_adjustor(movement, iv=1, spot=100, strike=100):
+
+    """
+    This function returns a function that adjusts the implied volatility to account for the curve effect. The function
+    is currently calibrated for 2 days to expiry and it simulates a movement from atm. It tries to arrive at an IV
+    for the atm after the movement.
+    :param movement: movement of the underlying in percentage with sign
+    :param iv: implied volatility of the strike
+    :param spot: spot price
+    :param strike: strike price
+    :return: adjusted implied volatility for the strike after the movement
+    """
+
+    coefs = [1065.29, 11.3532, 0.973536]
+    current_diff = (spot/strike - 1)
+    current_iv_multiple = coefs[0] * current_diff ** 2 + coefs[1] * current_diff + coefs[2]
+    atm_iv = iv / current_iv_multiple
+    print(f'atm_iv: {atm_iv}, iv: {iv}, current_iv_multiple: {current_iv_multiple}')
+    displacement_from_atm = movement + current_diff
+    print(f'displacement from atm: {displacement_from_atm}, movement: {movement}')
+    premium_to_atm_iv = coefs[0] * displacement_from_atm ** 2 + coefs[1] * displacement_from_atm + coefs[2]
+    return atm_iv * premium_to_atm_iv
+
+
+def target_movement(flag, current_price, target_price, current_spot, strike, timeleft, time_delta=None):
+    """
+    :param flag: 'c' or 'p'
+    :param current_price: current price of the option
+    :param target_price: target price of the option
+    :param current_spot: current spot price
+    :param strike: strike price
+    :param timeleft: time left to expiry in years
+    :param time_delta: in minutes
+    :return:
+    """
+    flag = flag.lower()[0]
+    price_func = call if flag == 'c' else put
+    vol = implied_volatility(current_price, current_spot, strike, timeleft, 0.06, flag)
+    print(vol)
+    timeleft = timeleft - (time_delta / 525600) if time_delta else timeleft
+    f = lambda s1: price_func(s1, strike, timeleft, 0.06, vol) - target_price
+
+    if target_price > current_price:
+        if flag == 'c':
+            a = current_spot
+            b = 2 * current_spot
+        else:
+            a = 0.05
+            b = current_spot
+    else:
+        if flag == 'c':
+            a = 0.05
+            b = current_spot
+        else:
+            a = current_spot
+            b = 2 * current_spot
+
+    target_spot = brentq(f, a=a, b=b, xtol=1e-15, rtol=1e-15, maxiter=1000, full_output=False)
+
+    assert isinstance(target_spot, float)
+
+    movement = (target_spot/current_spot) - 1
+
+    return movement

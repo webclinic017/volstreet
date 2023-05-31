@@ -9,7 +9,7 @@ from smartapi.smartExceptions import DataException
 import pyotp
 from threading import Thread
 from autotrader.SmartWebSocketV2 import SmartWebSocketV2
-from autotrader import scrips, holidays, symbol_df, blackscholes as bs
+from autotrader import scrips, holidays, symbol_df, logger, blackscholes as bs
 from collections import defaultdict
 import yfinance as yf
 from fuzzywuzzy import process
@@ -17,22 +17,11 @@ import re
 import logging
 import functools
 import itertools
+import traceback
 
 global login_data, obj
 
 large_order_threshold = 10
-
-
-def create_logger(name, level, log_file_prefix):
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-    today = datetime.now().strftime("%Y-%m-%d")
-    log_filename = f"{log_file_prefix}-{today}.log"
-    handler = logging.FileHandler(log_filename)
-    formatter = logging.Formatter("%(asctime)s:%(levelname)s:%(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    return logger
 
 
 def log_errors(func):
@@ -41,17 +30,9 @@ def log_errors(func):
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            logger1.error(f"Error in function {func.__name__}: {e}")
-            raise
-
+            logger.error(f"Error in function {func.__name__}: {e}\nTraceback:{traceback.format_exc()}")
+            raise e
     return wrapper
-
-
-# Create and configure the error logger
-logger1 = create_logger("logger1", logging.ERROR, "errors")
-
-# Create and configure the second logger
-logger2 = create_logger("logger2", logging.INFO, "info")
 
 
 class OptionChains(defaultdict):
@@ -181,7 +162,7 @@ class PriceFeed(SmartWebSocketV2):
                         (expiry, strike)
                     )
                 except Exception as e:
-                    logger1.error(
+                    logger.error(
                         f"Error in fetching tokens for {strike, expiry} for {underlying.name}: {e}"
                     )
                     print(
@@ -786,17 +767,17 @@ class SyntheticArbSystem:
                         )
                     elif i == 3:
                         placeorder(put_buy_token, put_buy_symbol, qty, "SELL", "MARKET")
-            logger2.info(
+            logger.info(
                 f"Order cancelled and reversed for {index} {expiry} {qty} Buy {buy_strike} Sell {sell_strike}"
             )
             self.unsuccessful_trades += 1
         elif all(statuses == "complete"):
             self.successful_trades += 1
-            logger2.info(
+            logger.info(
                 f"Order executed for {index} {expiry} {qty} Buy {buy_strike} Sell {sell_strike}"
             )
         elif any(statuses == "rejected"):
-            logger1.error(
+            logger.error(
                 f"Order rejected for {index} {expiry} {qty} Buy {buy_strike} Sell {sell_strike}"
             )
 
@@ -847,7 +828,7 @@ class Index:
         else:
             self.base = get_base(self.name)
             self.exchange_type = 1
-            logger2.info(f"Base for {self.name} is {self.base}")
+            logger.info(f"Base for {self.name} is {self.base}")
             # print(f"Base for {self.name} is {self.base}")
 
         if websocket:
@@ -1262,7 +1243,7 @@ class Index:
             if all(call_order_statuses == "complete") and all(
                 put_order_statuses == "complete"
             ):
-                logger2.info(
+                logger.info(
                     f"Synthetic Order(s) placed successfully for {buy_or_sell} {name} {strike} {expiry} "
                     f"{quantity_in_lots} lot(s)."
                 )
@@ -1273,7 +1254,7 @@ class Index:
             elif all(call_order_statuses == "rejected") and all(
                 put_order_statuses == "rejected"
             ):
-                logger2.info(
+                logger.info(
                     f"All synthetic orders rejected for {buy_or_sell} {name} {strike} "
                     f"{expiry} {quantity_in_lots} lot(s)."
                 )
@@ -1284,7 +1265,7 @@ class Index:
             elif any(call_order_statuses == "pending") and any(
                 put_order_statuses == "pending"
             ):
-                logger2.info(
+                logger.info(
                     f"Some synthetic orders pending for {buy_or_sell} {name} {strike} "
                     f"{expiry} {quantity_in_lots} lot(s)."
                 )
@@ -1293,7 +1274,7 @@ class Index:
                     f"{expiry} {quantity_in_lots} lot(s)."
                 )
             else:
-                logger1.error(
+                logger.error(
                     f"ERROR. Synthetic order statuses uncertain for {buy_or_sell} {name} {strike} "
                     f"{expiry} {quantity_in_lots} lot(s)."
                 )
@@ -1497,36 +1478,39 @@ class Index:
         order_tag = "Overnight Short Straddle"
 
         weekend_in_expiry = check_for_weekend(self.current_expiry)
+        ltp = avg_ltp if avg_ltp else self.fetch_ltp()
+        sell_strike = findstrike(ltp * strike_offset, self.base)
+        call_ltp, put_ltp = fetch_straddle_price(
+            self.name, self.current_expiry, sell_strike
+        )
+        call_iv, put_iv, iv = straddle_iv(
+            call_ltp, put_ltp, ltp, sell_strike, timetoexpiry(self.current_expiry)
+        )
+        iv = iv * 100
 
+        # This if-clause checks how far the expiry is
         if (
             timetoexpiry(self.current_expiry, effective_time=True, in_days=True) > 4
         ) or weekend_in_expiry:  # far from expiry
-            ltp = avg_ltp if avg_ltp else self.fetch_ltp()
-            sell_strike = findstrike(ltp * strike_offset, self.base)
-            call_ltp, put_ltp = fetch_straddle_price(
-                self.name, self.current_expiry, sell_strike
-            )
-            call_iv, put_iv, iv = straddle_iv(
-                call_ltp, put_ltp, ltp, sell_strike, timetoexpiry(self.current_expiry)
-            )
-            iv = iv * 100
+
             if iv < vix * iv_threshold:
                 notifier(
-                    f"IV is too low compared to VIX: IV {iv}, Vix {vix}.",
+                    f"IV is too low compared to VIX - IV: {iv}, Vix: {vix}.",
                     self.webhook_url,
                 )
                 return
             else:
                 notifier(
-                    f"IV is fine compared to VIX: IV {iv}, Vix {vix}.", self.webhook_url
+                    f"IV is fine compared to VIX - IV: {iv}, Vix: {vix}.", self.webhook_url
                 )
         elif (
             timetoexpiry(self.current_expiry, effective_time=True, in_days=True) < 2
         ):  # only exit
             sell_strike = None
         else:
-            ltp = avg_ltp if avg_ltp else self.fetch_ltp()
-            sell_strike = findstrike(ltp * strike_offset, self.base)
+            notifier(
+                f"Rolling over overnight straddle - IV: {iv}, Vix: {vix}.", self.webhook_url
+            )
 
         trade_data = load_data()
         buy_strike = trade_data[self.name]
@@ -2067,7 +2051,7 @@ class Index:
             statuses = lookup_and_return(order_book, "orderid", order_ids, "status")
 
             if isinstance(statuses, (int, np.int32, np.int64)):
-                logger1.error(f"Statuses is {statuses} for orderid(s) {order_ids}")
+                logger.error(f"Statuses is {statuses} for orderid(s) {order_ids}")
 
             if all(statuses == pending_text):
                 return False, False
@@ -2799,10 +2783,32 @@ def login(user, pin, apikey, authkey, webhook_url=None):
             if attempt == 6:
                 notifier("Login failed.", webhook_url)
                 raise Exception("Login failed.")
-    notifier(
-        f'Date: {currenttime().strftime("%d %b %Y %H:%M:%S")}\nLogged in successfully.',
-        webhook_url,
-    )
+    else:
+        today = datetime.now().strftime("%Y-%m-%d")
+        info_log_filename = f"{obj.userId}-info-{today}.log"
+        error_log_filename = f"{obj.userId}-error-{today}.log"
+        formatter = logging.Formatter("%(asctime)s:%(levelname)s:%(message)s")
+
+        for handler in logger.handlers[:]:
+            if isinstance(handler, logging.FileHandler):
+                logger.removeHandler(handler)
+
+        info_handler = logging.FileHandler(info_log_filename)
+        info_handler.setLevel(logging.INFO)
+        info_handler.setFormatter(formatter)
+        logger.addHandler(info_handler)
+
+        error_handler = logging.FileHandler(error_log_filename)
+        error_handler.setLevel(logging.ERROR)
+        error_handler.setFormatter(formatter)
+        logger.addHandler(error_handler)
+
+        logger.info("Logged in successfully.")
+
+        notifier(
+            f'Date: {currenttime().strftime("%d %b %Y %H:%M:%S")}\nLogged in successfully.',
+            webhook_url,
+        )
 
 
 def parse_symbol(symbol):
@@ -2936,7 +2942,7 @@ def simulate_option_movement(
     if price is None and vol is None:
         raise ValueError("Either price or vol must be specified.")
     flag = flag.lower()[0]
-    price_func = bs.put if flag.upper().startswith("P") else bs.call
+    price_func = bs.put if flag == 'p' else bs.call
     simulated_move = simulated_move / 100
     simulated_spot = (
         (spot * (1 + simulated_move)) if flag == "p" else (spot * (1 - simulated_move))
