@@ -69,7 +69,7 @@ def intraday_straddles_on_indices(
     )
     nifty = atf.Index("NIFTY", webhook_url=discord_webhook_url)
     bnf = atf.Index("BANKNIFTY", webhook_url=discord_webhook_url)
-    fin = atf.Index("FINNIFTY", webhook_url=discord_webhook_url, spot_future_rate=0.01)
+    fin = atf.Index("FINNIFTY", webhook_url=discord_webhook_url, spot_future_rate=0.05)
 
     indices = atf.indices_to_trade(
         nifty, bnf, fin, multi_before_weekend=multi_before_weekend

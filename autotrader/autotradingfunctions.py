@@ -1991,7 +1991,7 @@ class Index:
                             equal_strike,
                             timetoexpiry(expiry),
                             option_type,
-                            simulated_move=0.2,
+                            simulated_move=0.002,
                             r=0.06,
                             vol=tracked_iv,
                             price=option_price,
@@ -2933,20 +2933,46 @@ def simulate_option_movement(
     strike,
     time_to_expiry,
     flag,
-    simulated_move=0.2,
+    direction="away",
+    simulated_move=0.002,
     r=0.06,
     vol=None,
     price=None,
     print_results=False,
 ):
+    """
+    :param spot:
+    :param strike:
+    :param time_to_expiry:
+    :param flag: option type for which price is to be simulated
+    :param direction: the direction of the move, "away" or "towards"
+    :param simulated_move:
+    :param r:
+    :param vol:
+    :param price:
+    :param print_results:
+    :return:
+    """
+
     if price is None and vol is None:
         raise ValueError("Either price or vol must be specified.")
     flag = flag.lower()[0]
     price_func = bs.put if flag == 'p' else bs.call
-    simulated_move = simulated_move / 100
-    simulated_spot = (
-        (spot * (1 + simulated_move)) if flag == "p" else (spot * (1 - simulated_move))
-    )
+
+    if direction == "away":
+        if flag == "c":
+            simulated_move = -simulated_move
+        else:
+            simulated_move = simulated_move
+    elif direction == "towards" or direction == "toward":
+        if flag == "c":
+            simulated_move = simulated_move
+        else:
+            simulated_move = -simulated_move
+    else:
+        raise ValueError("Invalid direction.")
+
+    simulated_spot = spot * (1 + simulated_move)
     if vol is None:
         try:
             vol = bs.implied_volatility(price, spot, strike, time_to_expiry, r, flag)
@@ -2955,10 +2981,12 @@ def simulate_option_movement(
     if price is None:
         price = price_func(spot, strike, time_to_expiry, r, vol)
     current_delta = bs.delta(spot, strike, time_to_expiry, r, vol, flag)
-    new_delta = bs.delta(simulated_spot, strike, time_to_expiry, r, vol, flag)
+
+    new_vol = bs.iv_curve_adjustor(simulated_move, time_to_expiry, vol, spot, strike)
+    new_delta = bs.delta(simulated_spot, strike, time_to_expiry, r, new_vol, flag)
     delta_change = new_delta - current_delta
     average_delta = abs((new_delta + current_delta) / 2)
-    new_price = price_func(simulated_spot, strike, time_to_expiry, r, vol)
+    new_price = price_func(simulated_spot, strike, time_to_expiry, r, new_vol)
     price_gain = price - new_price
 
     if print_results:
@@ -2967,7 +2995,7 @@ def simulate_option_movement(
             f"Delta Change: {delta_change:.2f}\nAverage Delta: {average_delta:.2f}\n"
             f"New Price: {new_price:.2f}\nPrice Change: {price_gain:.2f}\n"
             f"Volatility: {vol:.2f}\nSimulated Spot: {simulated_spot:.2f}\n"
-            f"Simulated Move: {simulated_move * 100:.2f}%\n"
+            f"Simulated Move: {simulated_move}%\n"
         )
 
     return [price_gain, average_delta]
@@ -3354,7 +3382,26 @@ def get_index_constituents(index_symbol, cutoff_pct=101):
     return constituent_tickers, constituent_weights
 
 
-def convert_option_chains_to_df(option_chains, return_all=False):
+def convert_option_chains_to_df(option_chains, return_all=False, for_surface=False):
+
+    def add_columns_for_surface(data_frame):
+
+        data_frame = data_frame.copy()
+        data_frame['atm_strike'] = data_frame.apply(
+            lambda row: findstrike(row.spot, 50) if row.symbol == 'NIFTY' else findstrike(row.spot, 100),
+            axis=1)
+        data_frame['strike_iv'] = np.where(data_frame.strike > data_frame.atm_strike, data_frame.call_iv,
+                                           np.where(data_frame.strike < data_frame.atm_strike,
+                                                    data_frame.put_iv, data_frame.avg_iv))
+        data_frame['atm_iv'] = data_frame.apply(
+            lambda row: data_frame[(data_frame.strike == row.atm_strike)
+                                   & (data_frame.expiry == row.expiry)].strike_iv.values[0], axis=1)
+        data_frame.sort_values(['symbol', 'expiry', 'strike'], inplace=True)
+        data_frame['distance'] = (data_frame['strike'] / data_frame['spot'] - 1)
+        data_frame['iv_multiple'] = data_frame['strike_iv'] / data_frame['atm_iv']
+        data_frame['distance_squared'] = data_frame['distance'] ** 2
+
+        return data_frame
 
     symbol_dfs = []
     for symbol in option_chains:
@@ -3371,6 +3418,8 @@ def convert_option_chains_to_df(option_chains, return_all=False):
             df['time_to_expiry'] = timetoexpiry(expiry)
             expiry_dfs.append(df)
         symbol_oc = pd.concat(expiry_dfs)
+        if for_surface:
+            symbol_oc = add_columns_for_surface(symbol_oc)
         symbol_dfs.append(symbol_oc)
 
     if return_all:

@@ -172,9 +172,7 @@ def main():
 def iv_curve_adjustor(movement, time_to_expiry, iv=1, spot=100, strike=100):
 
     """
-    This function returns a function that adjusts the implied volatility to account for the curve effect. The function
-    is currently calibrated for 2 days to expiry and it simulates a movement from atm. It tries to arrive at an IV
-    for the atm after the movement.
+    This function returns the adjusted implied volatility accounting for the curve effect.
     :param movement: movement of the underlying in percentage with sign
     :param time_to_expiry: time to expiry in years
     :param iv: implied volatility of the strike
@@ -197,11 +195,17 @@ def iv_curve_adjustor(movement, time_to_expiry, iv=1, spot=100, strike=100):
     current_diff = (strike/spot - 1)
     current_iv_multiple = coefs[0] * current_diff ** 2 + coefs[1] * current_diff + coefs[2]
     atm_iv = iv / current_iv_multiple
-    print(f'Backwardly calculated atm iv: {atm_iv}')
+
     new_spot = spot * (1 + movement)
     total_displacement = (strike / new_spot - 1)
     premium_to_atm_iv = coefs[0] * total_displacement ** 2 + coefs[1] * total_displacement + coefs[2]
-    return atm_iv * premium_to_atm_iv
+    new_iv = atm_iv * premium_to_atm_iv
+    print(
+        f'New iv: {new_iv} for strike {strike} spot {new_spot} '
+        f'iv {iv} atm_iv {atm_iv} movement {movement} '
+        f'time_to_expiry {time_to_expiry}'
+    )
+    return new_iv
 
 
 def target_movement(flag, current_price, target_price, current_spot, strike, timeleft, time_delta=None):

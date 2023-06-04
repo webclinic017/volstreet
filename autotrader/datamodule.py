@@ -66,13 +66,13 @@ def analyser(df, frequency=None, date_filter=None, _print=False):
             df = df.loc[dates[0]: dates[1]]
         else:
             df = df.loc[dates[0]]
-
-    if frequency is None or frequency == "D" or frequency == "B":
+    frequency = frequency.upper()
+    if frequency is None or frequency.startswith("D") or frequency == "B":
         custom_frequency = "B"
         multiplier = 24
         df = df.resample("B").ffill()
 
-    else:
+    elif frequency.startswith("W") or frequency.startswith("M"):
         custom_frequency = frequency
         if frequency.startswith("W"):
             multiplier = 9.09
@@ -98,12 +98,18 @@ def analyser(df, frequency=None, date_filter=None, _print=False):
                 df.index = pd.Series(pd.to_datetime(df.index), name="date")
         else:
             raise ValueError("Frequency not supported")
+    else:
+        raise ValueError("Frequency not supported")
 
     df.loc[:, "change"] = df.close.pct_change() * 100
     df.loc[:, "open_change"] = ((df.open / df.close.shift(1)) - 1) * 100
     df.loc[:, "abs_change"] = abs(df.change)
     df.loc[:, "abs_open_change"] = abs(df.open_change)
     df.loc[:, "realized_vol"] = df.abs_change * multiplier
+
+    if frequency in ["D-MON", "D-TUE", "D-WED", "D-THU", "D-FRI"]:
+        day_of_week = frequency.split("-")[1]
+        df = df[df.index.day_name().str.upper().str.contains(day_of_week)]
 
     if _print:
         print(
@@ -161,7 +167,17 @@ def get_multiple_recent_vol(
     return df_dict
 
 
-def ratio_analysis(x_df, y_df, periods_to_avg, return_summary=False):
+def ratio_analysis(
+        x_df: pd.DataFrame,
+        y_df: pd.DataFrame,
+        periods_to_avg: int = None,
+        return_summary=True,
+        add_rolling: bool | int = False
+):
+
+    if periods_to_avg is None:
+        periods_to_avg = len(x_df)
+
     x_close = x_df.iloc[-periods_to_avg:].close
     x_array = x_df.iloc[-periods_to_avg:].abs_change
     x_avg = x_array.mean()
@@ -189,6 +205,12 @@ def ratio_analysis(x_df, y_df, periods_to_avg, return_summary=False):
     if return_summary:
         ratio_summary.loc["Summary"] = ratio_summary.mean()
         ratio_summary.loc["Summary", "Ratio"] = avg_ratio
+
+    if add_rolling:
+        rolling_x_avg = x_array.rolling(add_rolling, min_periods=1).mean()
+        rolling_y_avg = y_array.rolling(add_rolling, min_periods=1).mean()
+        rolling_ratio = rolling_x_avg / rolling_y_avg
+        ratio_summary[f"Rolling {add_rolling} Ratio"] = rolling_ratio
 
     return ratio_summary
 
@@ -231,9 +253,21 @@ def gambler(instrument, freq, query):
         else:
             return [frequency]
 
-    def _calculate_streak_summary(dataframe, frequency):
+    def _calculate_streak_summary(df, frequency, query):
+
+        # Calculate the streak summary
+
+        if df.index[-1].replace(hour=15, minute=30) > atf.currenttime():
+            df = df.iloc[:-1]
+        check_date = df.index[-1]
+        total_instances = len(df)
+        df = generate_streak(df, query)
+        total_streaks = len(df)
+        number_of_positive_events = total_instances - total_streaks
+        event_occurrence_pct = number_of_positive_events / total_instances
+
         df = (
-            dataframe.reset_index()
+            df.reset_index()
             .groupby("streak_id")
             .agg({"date": ["min", "max"], "streak_count": "max"})
             .reset_index()
@@ -242,35 +276,56 @@ def gambler(instrument, freq, query):
 
         # Check if there is an ongoing streak
         current_streak = (
-            df.iloc[-1].streak_count
-            if pd.Timestamp.today().date() <= df.iloc[-1].end_date.date()
-            else False
+            df.iloc[-1].streak_count if df.iloc[-1].end_date == check_date else None
         )
+
+        # Calculating the percentile of the current streak
+        if current_streak:
+            current_streak_percentile = (
+                    df.streak_count.sort_values().values.searchsorted(current_streak) / len(df)
+            )
+        else:
+            current_streak_percentile = 0
 
         return {
             "freq": frequency,  # Use the given freq value instead of df.iloc[-1].name
+            "total_instances": total_instances,
+            "total_streaks": total_streaks,
+            "event_occurrence": event_occurrence_pct,
             "longest_streak": df.streak_count.max(),
             "longest_streak_start": df.start_date[df.streak_count.idxmax()],
             "longest_streak_end": df.end_date[df.streak_count.idxmax()],
             "current_streak": current_streak,
+            "current_streak_percentile": current_streak_percentile,
             "dataframe": df,
         }
 
-    def print_streak_summary(streak_summary):
+    def print_streak_summary(summary):
         print(
-            f"{streak_summary['freq']} - longest streak: {streak_summary['longest_streak']} "
-            f"from {streak_summary['longest_streak_start']:%d %b %Y} to {streak_summary['longest_streak_end']:%d %b %Y}"
+            f"Query: {dataframe.name} {query}\n"
+            f"Frequency: {summary['freq']}\n"
+            f"Total Instances: {summary['total_instances']}\n"
+            f"Total Streaks: {summary['total_streaks']}\n"
+            f"Event Occurrence: {summary['event_occurrence']}\n"
+            f"Longest Streak: {summary['longest_streak']}\n"
+            f"Longest Streak Start: {summary['longest_streak_start']}\n"
+            f"Longest Streak End: {summary['longest_streak_end']}\n"
+            f"Current Streak: {summary['current_streak']}\n"
+            f"Current Streak Percentile: {summary['current_streak_percentile']}\n"
         )
-        if streak_summary["current_streak"]:
-            print(f"Current streak: {streak_summary['current_streak']}\n")
 
     freqs = generate_frequency(freq)
-
     streaks = []
     for freq in freqs:
-        df = analyser(instrument, frequency=freq)
-        df = generate_streak(df, query)
-        streak_summary = _calculate_streak_summary(df, freq)
+        dataframe = analyser(instrument, frequency=freq)
+        if query == "abs_change":
+            recommended_threshold = dataframe.abs_change.mean() * 0.70  # 0.70 should cover 50% of the data
+            # (mildly adjusted for abnormal distribution)
+            recommended_threshold = round(recommended_threshold, 2)
+            recommended_sign = ">" if dataframe.iloc[-2].abs_change > recommended_threshold else "<"
+            query = f"abs_change {recommended_sign} {recommended_threshold}"
+            print(f"Recommended query: {query}\n")
+        streak_summary = _calculate_streak_summary(dataframe, freq, query)
         streaks.append(streak_summary)
         print_streak_summary(streak_summary)
     # Convert the list of dictionaries to a list of DataFrames
