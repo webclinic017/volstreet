@@ -1,4 +1,5 @@
 import autotrader.autotradingfunctions as atf
+from autotrader.exceptions import ApiKeyNotFound
 from eod import EodHistoricalData
 import pandas as pd
 from dateutil.relativedelta import relativedelta, MO, TU, WE, TH, FR
@@ -7,6 +8,8 @@ import numpy as np
 
 class DataClient:
     def __init__(self, api_key):
+        if api_key is None:
+            raise ApiKeyNotFound("EOD API Key not found")
         self.api_key = api_key
         self.client = EodHistoricalData(api_key=api_key)
 
@@ -66,7 +69,9 @@ def analyser(df, frequency=None, date_filter=None, _print=False):
             df = df.loc[dates[0]: dates[1]]
         else:
             df = df.loc[dates[0]]
-    frequency = frequency.upper()
+
+    frequency = frequency.upper() if frequency is not None else None
+
     if frequency is None or frequency.startswith("D") or frequency == "B":
         custom_frequency = "B"
         multiplier = 24
@@ -213,6 +218,21 @@ def ratio_analysis(
         ratio_summary[f"Rolling {add_rolling} Ratio"] = rolling_ratio
 
     return ratio_summary
+
+
+def get_summary_ratio(target_symbol, benchmark_symbol, frequency='D', periods_to_avg=50):
+
+    try:
+        dc = DataClient(__import__('os').getenv('EOD_API_KEY'))
+    except ApiKeyNotFound:
+        return None
+
+    benchmark = dc.get_data(benchmark_symbol)
+    target = dc.get_data(target_symbol)
+    benchmark = analyser(benchmark, frequency=frequency)
+    target = analyser(target, frequency=frequency)
+    ratio = ratio_analysis(target, benchmark, periods_to_avg=periods_to_avg)
+    return ratio.loc['Summary', 'Ratio']
 
 
 @retain_name

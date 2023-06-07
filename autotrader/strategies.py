@@ -112,6 +112,69 @@ def intraday_straddles_on_indices(
         )
 
 
+def intraday_strangles_on_indices(
+    parameters,
+    client=None,
+    user=None,
+    pin=None,
+    apikey=None,
+    authkey=None,
+    webhook_url=None,
+    start_time=(9, 16),
+    multi_before_weekend=True,
+):
+    user, pin, apikey, authkey, discord_webhook_url = get_user_data(
+        client, user, pin, apikey, authkey, webhook_url
+    )
+
+    # If today is a holiday, the script will exit
+    if atf.currenttime().date() in atf.holidays:
+        atf.notifier("Today is a holiday. Exiting.", discord_webhook_url)
+        exit()
+
+    atf.login(
+        user=user,
+        pin=pin,
+        apikey=apikey,
+        authkey=authkey,
+        webhook_url=discord_webhook_url,
+    )
+    nifty = atf.Index("NIFTY", webhook_url=discord_webhook_url)
+    bnf = atf.Index("BANKNIFTY", webhook_url=discord_webhook_url)
+    fin = atf.Index("FINNIFTY", webhook_url=discord_webhook_url, spot_future_rate=0.05)
+
+    indices = atf.indices_to_trade(
+        nifty, bnf, fin, multi_before_weekend=multi_before_weekend
+    )
+    quantity_multiplier = 2 if len(indices) == 1 else 1
+    parameters["quantity_in_lots"] = (
+        parameters["quantity_in_lots"] * quantity_multiplier
+    )
+
+    strangle_threads = []
+    for index in indices:
+        atf.notifier(f"Trading {index.name} strangle.", discord_webhook_url)
+        thread = threading.Thread(target=index.intraday_strangle, kwargs=parameters)
+        strangle_threads.append(thread)
+
+    # Wait for the market to open
+    while atf.currenttime().time() < time(*start_time):
+        pass
+
+    # Start the straddle threads
+    for thread in strangle_threads:
+        thread.start()
+
+    for thread in strangle_threads:
+        thread.join()
+
+    # Call the data appender function on the traded indices
+    for index in indices:
+        atf.append_data_to_json(
+            index.order_log, f"{user}_{index.name}_strangle_log.json"
+        )
+
+
 def overnight_straddle_nifty(
     quantity_in_lots,
     client=None,

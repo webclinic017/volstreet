@@ -169,7 +169,7 @@ def main():
     )
 
 
-def iv_curve_adjustor(movement, time_to_expiry, iv=1, spot=100, strike=100):
+def iv_curve_adjustor(movement, time_to_expiry, iv=1, spot=100, strike=100, _print_details=False):
 
     """
     This function returns the adjusted implied volatility accounting for the curve effect.
@@ -178,6 +178,7 @@ def iv_curve_adjustor(movement, time_to_expiry, iv=1, spot=100, strike=100):
     :param iv: implied volatility of the strike
     :param spot: spot price
     :param strike: strike price
+    :param _print_details: print details of the adjustment
     :return: adjusted implied volatility for the strike after the movement
     """
 
@@ -200,15 +201,20 @@ def iv_curve_adjustor(movement, time_to_expiry, iv=1, spot=100, strike=100):
     total_displacement = (strike / new_spot - 1)
     premium_to_atm_iv = coefs[0] * total_displacement ** 2 + coefs[1] * total_displacement + coefs[2]
     new_iv = atm_iv * premium_to_atm_iv
-    print(
-        f'New iv: {new_iv} for strike {strike} spot {new_spot} '
-        f'iv {iv} atm_iv {atm_iv} movement {movement} '
-        f'time_to_expiry {time_to_expiry}'
-    )
+
+    if _print_details:
+        print(
+            f'New iv: {new_iv} for strike {strike} spot {new_spot} '
+            f'iv {iv} atm_iv {atm_iv} movement {movement} '
+            f'time_to_expiry {time_to_expiry}'
+        )
+
     return new_iv
 
 
-def target_movement(flag, current_price, target_price, current_spot, strike, timeleft, time_delta=None):
+def target_movement(
+        flag, current_price, target_price, current_spot, strike, timeleft, time_delta=None, _print_details=False
+):
     """
     :param flag: 'c' or 'p'
     :param current_price: current price of the option
@@ -217,6 +223,7 @@ def target_movement(flag, current_price, target_price, current_spot, strike, tim
     :param strike: strike price
     :param timeleft: time left to expiry in years
     :param time_delta: in minutes
+    :param _print_details: print details of the adjustment
     :return:
     """
     flag = flag.lower()[0]
@@ -228,7 +235,8 @@ def target_movement(flag, current_price, target_price, current_spot, strike, tim
     timeleft = timeleft - (time_delta / 525600) if time_delta else timeleft
     modified_vol = iv_curve_adjustor(estimated_movement, timeleft, iv=vol, spot=current_spot, strike=strike)
 
-    print(f'estimated movement: {estimated_movement}, vol: {vol}, modified vol: {modified_vol}')
+    if _print_details:
+        print(f'estimated movement: {estimated_movement}, vol: {vol}, modified vol: {modified_vol}')
 
     f = lambda s1: price_func(s1, strike, timeleft, 0.06, modified_vol) - target_price
 
