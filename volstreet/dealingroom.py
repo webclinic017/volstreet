@@ -8,8 +8,9 @@ from smartapi import SmartConnect
 from smartapi.smartExceptions import DataException
 import pyotp
 from threading import Thread
-from autotrader.SmartWebSocketV2 import SmartWebSocketV2
-from autotrader import scrips, holidays, symbol_df, logger, blackscholes as bs, datamodule as dm
+from volstreet.SmartWebSocketV2 import SmartWebSocketV2
+from volstreet.constants import scrips, holidays, symbol_df, logger
+from volstreet import blackscholes as bs, datamodule as dm
 from collections import defaultdict
 import yfinance as yf
 from fuzzywuzzy import process
@@ -1574,7 +1575,6 @@ class Index:
         # Placing orders
         if buy_strike is None and sell_strike is None:
             notifier(f"{self.name} No trade required.", self.webhook_url)
-            return
         elif sell_strike is None:  # only exiting current position
             notifier(
                 f"{self.name} Exiting current position on strike {buy_strike}.", self.webhook_url

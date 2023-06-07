@@ -1,4 +1,4 @@
-from autotrader.strategies import intraday_straddles_on_indices
+from volstreet.strategies import intraday_options_on_indices
 from multiprocessing import Process
 from time import sleep
 
@@ -33,8 +33,9 @@ client_dict = {
 
 def start_strategy(user, params):
     print('Starting strategy for client:', client)
-    process = Process(target=intraday_straddles_on_indices,
+    process = Process(target=intraday_options_on_indices,
                       kwargs=dict(parameters=params,
+                                  strategy='straddle',
                                   client=user,
                                   multi_before_weekend=False))
     process.start()

@@ -1,5 +1,5 @@
-import autotrader.autotradingfunctions as atf
-from autotrader.exceptions import ApiKeyNotFound
+import volstreet as vs
+from volstreet.exceptions import ApiKeyNotFound
 from eod import EodHistoricalData
 import pandas as pd
 from dateutil.relativedelta import relativedelta, MO, TU, WE, TH, FR
@@ -277,7 +277,7 @@ def gambler(instrument, freq, query):
 
         # Calculate the streak summary
 
-        if df.index[-1].replace(hour=15, minute=30) > atf.currenttime():
+        if df.index[-1].replace(hour=15, minute=30) > vs.currenttime():
             df = df.iloc[:-1]
         check_date = df.index[-1]
         total_instances = len(df)
@@ -386,14 +386,14 @@ def simulate_strike_premium_payoff(
     )
 
     data["call_strike"] = data["close"].apply(
-        lambda x: atf.findstrike(x * (1 + strike_offset), base)
+        lambda x: vs.findstrike(x * (1 + strike_offset), base)
     )
     data["put_strike"] = data["close"].apply(
-        lambda x: atf.findstrike(x * (1 - strike_offset), base)
+        lambda x: vs.findstrike(x * (1 - strike_offset), base)
     )
     data["outcome_spot"] = data["close"].shift(-1)
     data["initial_premium"] = data.apply(
-        lambda row: atf.calc_combined_premium(
+        lambda row: vs.calc_combined_premium(
             row.close,
             row.iv / 100,
             row.time_to_expiry,
@@ -403,7 +403,7 @@ def simulate_strike_premium_payoff(
         axis=1,
     )
     data["outcome_premium"] = data.apply(
-        lambda row: atf.calc_combined_premium(
+        lambda row: vs.calc_combined_premium(
             row.outcome_spot,
             row.iv / 100,
             0,
@@ -448,7 +448,7 @@ def get_index_vs_constituents_recent_vols(
     if return_all is False:
         simulate_backtest = False
 
-    index = atf.Index(index_symbol)
+    index = vs.Index(index_symbol)
     constituents, weights = index.get_constituents(cutoff_pct=90)
     weights = [w / sum(weights) for w in weights]
 

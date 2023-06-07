@@ -1,5 +1,5 @@
-from autotrader import autotradingfunctions as atf
-import autotrader.datamodule as dm
+import volstreet as vs
+import volstreet.datamodule as dm
 import threading
 from datetime import time
 from time import sleep
@@ -30,8 +30,9 @@ def get_user_data(client, user, pin, apikey, authkey, webhook_url):
     return user, pin, apikey, authkey, webhook_url
 
 
-def intraday_straddles_on_indices(
+def intraday_options_on_indices(
     parameters,
+    strategy,  # "straddle" or "strangle"
     client=None,
     user=None,
     pin=None,
@@ -42,36 +43,43 @@ def intraday_straddles_on_indices(
     start_time=(9, 16),
     multi_before_weekend=True,
 ):
+
+    """
+    :param parameters: parameters for the strategy (refer to the strategy's docstring)
+    :param strategy: 'straddle' or 'strangle' will invoke intraday_straddle or intraday_strangle of the index
+    :param client:
+    :param user:
+    :param pin:
+    :param apikey:
+    :param authkey:
+    :param webhook_url:
+    :param shared_data:
+    :param start_time:
+    :param multi_before_weekend:
+    :return:
+    """
+
     user, pin, apikey, authkey, discord_webhook_url = get_user_data(
         client, user, pin, apikey, authkey, webhook_url
     )
 
-    # Setting the shared data
-    if shared_data:
-        shared_data = atf.SharedData()
-        update_data_thread = threading.Thread(target=shared_data.update_data)
-        parameters["shared_data"] = shared_data
-    else:
-        shared_data = None
-        update_data_thread = None
-
     # If today is a holiday, the script will exit
-    if atf.currenttime().date() in atf.holidays:
-        atf.notifier("Today is a holiday. Exiting.", discord_webhook_url)
+    if vs.currenttime().date() in vs.holidays:
+        vs.notifier("Today is a holiday. Exiting.", discord_webhook_url)
         exit()
 
-    atf.login(
+    vs.login(
         user=user,
         pin=pin,
         apikey=apikey,
         authkey=authkey,
         webhook_url=discord_webhook_url,
     )
-    nifty = atf.Index("NIFTY", webhook_url=discord_webhook_url)
-    bnf = atf.Index("BANKNIFTY", webhook_url=discord_webhook_url)
-    fin = atf.Index("FINNIFTY", webhook_url=discord_webhook_url, spot_future_rate=0.05)
+    nifty = vs.Index("NIFTY", webhook_url=discord_webhook_url)
+    bnf = vs.Index("BANKNIFTY", webhook_url=discord_webhook_url)
+    fin = vs.Index("FINNIFTY", webhook_url=discord_webhook_url)
 
-    indices = atf.indices_to_trade(
+    indices = vs.indices_to_trade(
         nifty, bnf, fin, multi_before_weekend=multi_before_weekend
     )
     quantity_multiplier = 2 if len(indices) == 1 else 1
@@ -79,25 +87,34 @@ def intraday_straddles_on_indices(
         parameters["quantity_in_lots"] * quantity_multiplier
     )
 
-    straddle_threads = []
+    # Setting the shared data
+    if shared_data:
+        shared_data = vs.SharedData()
+        update_data_thread = threading.Thread(target=shared_data.update_data)
+        parameters["shared_data"] = shared_data
+    else:
+        shared_data = None
+        update_data_thread = None
+
+    options_threads = []
     for index in indices:
-        atf.notifier(f"Trading {index.name} straddle.", discord_webhook_url)
-        thread = threading.Thread(target=index.intraday_straddle, kwargs=parameters)
-        straddle_threads.append(thread)
+        vs.notifier(f"Trading {index.name} {strategy}.", discord_webhook_url)
+        thread = threading.Thread(target=getattr(index, f'intraday_{strategy}'), kwargs=parameters)
+        options_threads.append(thread)
 
     # Wait for the market to open
-    while atf.currenttime().time() < time(*start_time):
+    while vs.currenttime().time() < time(*start_time):
         pass
 
     # Start the data updater thread
     if shared_data and update_data_thread is not None:
         update_data_thread.start()
 
-    # Start the straddle threads
-    for thread in straddle_threads:
+    # Start the options threads
+    for thread in options_threads:
         thread.start()
 
-    for thread in straddle_threads:
+    for thread in options_threads:
         thread.join()
 
     # Stop the data updater thread
@@ -107,71 +124,8 @@ def intraday_straddles_on_indices(
 
     # Call the data appender function on the traded indices
     for index in indices:
-        atf.append_data_to_json(
-            index.order_log, f"{user}_{index.name}_straddle_log.json"
-        )
-
-
-def intraday_strangles_on_indices(
-    parameters,
-    client=None,
-    user=None,
-    pin=None,
-    apikey=None,
-    authkey=None,
-    webhook_url=None,
-    start_time=(9, 16),
-    multi_before_weekend=True,
-):
-    user, pin, apikey, authkey, discord_webhook_url = get_user_data(
-        client, user, pin, apikey, authkey, webhook_url
-    )
-
-    # If today is a holiday, the script will exit
-    if atf.currenttime().date() in atf.holidays:
-        atf.notifier("Today is a holiday. Exiting.", discord_webhook_url)
-        exit()
-
-    atf.login(
-        user=user,
-        pin=pin,
-        apikey=apikey,
-        authkey=authkey,
-        webhook_url=discord_webhook_url,
-    )
-    nifty = atf.Index("NIFTY", webhook_url=discord_webhook_url)
-    bnf = atf.Index("BANKNIFTY", webhook_url=discord_webhook_url)
-    fin = atf.Index("FINNIFTY", webhook_url=discord_webhook_url, spot_future_rate=0.05)
-
-    indices = atf.indices_to_trade(
-        nifty, bnf, fin, multi_before_weekend=multi_before_weekend
-    )
-    quantity_multiplier = 2 if len(indices) == 1 else 1
-    parameters["quantity_in_lots"] = (
-        parameters["quantity_in_lots"] * quantity_multiplier
-    )
-
-    strangle_threads = []
-    for index in indices:
-        atf.notifier(f"Trading {index.name} strangle.", discord_webhook_url)
-        thread = threading.Thread(target=index.intraday_strangle, kwargs=parameters)
-        strangle_threads.append(thread)
-
-    # Wait for the market to open
-    while atf.currenttime().time() < time(*start_time):
-        pass
-
-    # Start the straddle threads
-    for thread in strangle_threads:
-        thread.start()
-
-    for thread in strangle_threads:
-        thread.join()
-
-    # Call the data appender function on the traded indices
-    for index in indices:
-        atf.append_data_to_json(
-            index.order_log, f"{user}_{index.name}_strangle_log.json"
+        vs.append_data_to_json(
+            index.order_log, f"{user}_{index.name}_{strategy}_log.json"
         )
 
 
@@ -189,20 +143,20 @@ def overnight_straddle_nifty(
     )
 
     # If today is a holiday, the script will exit
-    if atf.currenttime().date() in atf.holidays:
-        atf.notifier(
+    if vs.currenttime().date() in vs.holidays:
+        vs.notifier(
             "Today is either a holiday or Friday. Exiting.", discord_webhook_url
         )
         exit()
 
-    atf.login(
+    vs.login(
         user=user,
         pin=pin,
         apikey=apikey,
         authkey=authkey,
         webhook_url=discord_webhook_url,
     )
-    nifty = atf.Index("NIFTY", webhook_url=discord_webhook_url)
+    nifty = vs.Index("NIFTY", webhook_url=discord_webhook_url)
 
     # Rolling over the short straddle
     nifty.rollover_overnight_short_straddle(
@@ -210,18 +164,18 @@ def overnight_straddle_nifty(
     )
 
     # Buying next week's hedge if it is expiry day
-    if atf.timetoexpiry(nifty.current_expiry, in_days=True) < 1:
+    if vs.timetoexpiry(nifty.current_expiry, in_days=True) < 1:
         nifty.buy_weekly_hedge(
             quantity_in_lots, "strangle", call_offset=0.997, put_offset=0.98
         )
 
     try:
-        atf.append_data_to_json(nifty.order_log, f"{user}_NIFTY_ON_straddle_log.json")
+        vs.append_data_to_json(nifty.order_log, f"{user}_NIFTY_ON_straddle_log.json")
     except Exception as e:
-        atf.notifier(f"Appending data failed: {e}", discord_webhook_url)
+        vs.notifier(f"Appending data failed: {e}", discord_webhook_url)
 
 
-@atf.log_errors
+@vs.log_errors
 def intraday_trend_on_nifty(
     quantity_in_lots,
     client=None,
@@ -237,11 +191,11 @@ def intraday_trend_on_nifty(
         client, user, pin, apikey, authkey, webhook_url
     )
 
-    if atf.currenttime().date() in atf.holidays:
-        atf.notifier("Today is a holiday. Exiting.")
+    if vs.currenttime().date() in vs.holidays:
+        vs.notifier("Today is a holiday. Exiting.")
         exit()
 
-    atf.login(
+    vs.login(
         user=user,
         pin=pin,
         apikey=apikey,
@@ -249,44 +203,44 @@ def intraday_trend_on_nifty(
         webhook_url=discord_webhook_url,
     )
 
-    nifty = atf.Index("NIFTY", webhook_url=discord_webhook_url)
+    nifty = vs.Index("NIFTY", webhook_url=discord_webhook_url)
 
-    while atf.currenttime().time() < time(*start_time):
+    while vs.currenttime().time() < time(*start_time):
         pass
 
     nifty_open_price = nifty.fetch_ltp()
     movement = 0
-    vix = atf.get_current_vix()
+    vix = vs.get_current_vix()
     threshold_movement = vix / 48
     exit_time = time(*exit_time)
-    scan_end_time = atf.datetime.combine(atf.currenttime().date(), exit_time)
-    scan_end_time = scan_end_time - atf.timedelta(minutes=10)
+    scan_end_time = vs.datetime.combine(vs.currenttime().date(), exit_time)
+    scan_end_time = scan_end_time - vs.timedelta(minutes=10)
     scan_end_time = scan_end_time.time()
     upper_limit = nifty_open_price * (1 + threshold_movement / 100)
     lower_limit = nifty_open_price * (1 - threshold_movement / 100)
 
-    atf.notifier(
+    vs.notifier(
         f"Nifty trender starting with {threshold_movement:0.2f} threshold movement\n"
         f"Current Price: {nifty_open_price}\nUpper limit: {upper_limit:0.2f}\n"
         f"Lower limit: {lower_limit:0.2f}.",
         discord_webhook_url,
     )
-    last_printed_time = atf.currenttime()
+    last_printed_time = vs.currenttime()
     while (
-        abs(movement) < threshold_movement and atf.currenttime().time() < scan_end_time
+        abs(movement) < threshold_movement and vs.currenttime().time() < scan_end_time
     ):
         movement = ((nifty.fetch_ltp() / nifty_open_price) - 1) * 100
-        if atf.currenttime() > last_printed_time + atf.timedelta(minutes=1):
+        if vs.currenttime() > last_printed_time + vs.timedelta(minutes=1):
             print(f"Nifty trender: {movement:0.2f} movement.")
-            last_printed_time = atf.currenttime()
+            last_printed_time = vs.currenttime()
         sleep(1)
 
-    if atf.currenttime().time() > scan_end_time:
-        atf.notifier("Nifty trender exiting due to time.", discord_webhook_url)
+    if vs.currenttime().time() > scan_end_time:
+        vs.notifier("Nifty trender exiting due to time.", discord_webhook_url)
         return
 
     price = nifty.fetch_ltp()
-    atm_strike = atf.findstrike(price, nifty.base)
+    atm_strike = vs.findstrike(price, nifty.base)
     position = "BUY" if movement > 0 else "SELL"
     nifty.place_synthetic_fut_order(
         atm_strike,
@@ -299,12 +253,12 @@ def intraday_trend_on_nifty(
     stop_loss_multiplier = 1.0032 if position == "SELL" else 0.9968
     stop_loss_price = price * stop_loss_multiplier
     stop_loss_hit = False
-    atf.notifier(
+    vs.notifier(
         f"Nifty {position} trender triggered with {movement:0.2f} movement. Nifty at {price}. "
         f"Stop loss at {stop_loss_price}.",
         discord_webhook_url,
     )
-    while atf.currenttime().time() < exit_time and not stop_loss_hit:
+    while vs.currenttime().time() < exit_time and not stop_loss_hit:
         if position == "BUY":
             stop_loss_hit = nifty.fetch_ltp() < stop_loss_price
         else:
@@ -319,7 +273,7 @@ def intraday_trend_on_nifty(
         check_status=True,
     )
     stop_loss_message = "Trender stop loss hit. " if stop_loss_hit else ""
-    atf.notifier(
+    vs.notifier(
         f"{stop_loss_message}Nifty trender exited. Nifty at {nifty.fetch_ltp()}.",
         discord_webhook_url,
     )
@@ -340,7 +294,7 @@ def index_vs_constituents(
     expirys = ("future", "current") if expirys is None else expirys
 
     # Fetch constituents
-    constituent_tickers, constituent_weights = atf.get_index_constituents(
+    constituent_tickers, constituent_weights = vs.get_index_constituents(
         index_symbol, cutoff_pct
     )
     total_weight, number_of_stocks = sum(constituent_weights), len(constituent_tickers)
@@ -348,7 +302,7 @@ def index_vs_constituents(
     total_exposure = exposure_per_stock * number_of_stocks
 
     # Fetch index info
-    index = atf.Index(index_symbol)
+    index = vs.Index(index_symbol)
     index_info = index.fetch_otm_info(index_strike_offset, expiry=expirys[0])
     index_iv, index_shares = (
         index_info["avg_iv"],
@@ -372,7 +326,7 @@ def index_vs_constituents(
     index_call_break_even, index_put_break_even = index_break_even_points[-2:]
 
     # Fetch constituent info
-    constituents = list(map(atf.Stock, constituent_tickers))
+    constituents = list(map(vs.Stock, constituent_tickers))
     constituent_infos = [
         stock.fetch_otm_info(strike_offset, expiry=expirys[1]) for stock in constituents
     ]
