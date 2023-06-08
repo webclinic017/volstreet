@@ -2701,9 +2701,6 @@ class Index:
                 call_sl = call_ltp > call_stop_loss_price
                 put_sl = put_ltp > put_stop_loss_price
 
-                # DELETE THIS LATER ONLY FOR TESTING
-                call_stop_loss_price = call_stop_loss_price - 0.2
-
                 # Calculate mtm price
                 call_exit_price = exit_price_dict.get('call', call_ltp)
                 put_exit_price = exit_price_dict.get('put', put_ltp)
