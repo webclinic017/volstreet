@@ -2698,8 +2698,11 @@ class Index:
                     spot=underlying_ltp,
                     timeleft=timetoexpiry(expiry)
                 )
-                call_sl = call_ltp > call_stop_loss_price
-                put_sl = put_ltp > put_stop_loss_price
+
+                if call_sl is False:
+                    call_sl = call_ltp > call_stop_loss_price
+                if put_sl is False:
+                    put_sl = put_ltp > put_stop_loss_price
 
                 # Calculate mtm price
                 call_exit_price = exit_price_dict.get('call', call_ltp)
