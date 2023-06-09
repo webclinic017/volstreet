@@ -2842,7 +2842,7 @@ class Index:
         )
 
         summary_message = "\n".join(
-            f"{k}: {v}" for k, v in self.order_log[order_tag][0].items()
+            f"{k}: {v}" for k, v in self.order_log[order_tag][-1].items()
         )
 
         traded_call_iv, traded_put_iv, traded_avg_iv = strangle_iv(
@@ -2934,7 +2934,7 @@ class Index:
                 order_tag='Strangle Exit',
                 Underlying=self.name,
                 Action='BUY',
-                Strike=strangle.call_option.strike,
+                Strikes=[strangle.call_option.strike, strangle.put_option.strike],
                 Expiry=strangle.call_option.expiry,
                 Qty=quantity_in_lots,
             )
@@ -2991,6 +2991,7 @@ class Index:
         notifier(exit_message, self.webhook_url)
         shared_info_dict["exit_triggers"] = {"trade_complete": True}
         position_monitor_thread.join()
+        return shared_info_dict
 
     def intraday_straddle_delta_hedged(
         self,
