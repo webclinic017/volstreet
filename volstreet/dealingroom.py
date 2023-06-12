@@ -2589,6 +2589,8 @@ class Index:
         call_strike_offset=0,
         put_strike_offset=0,
         stop_loss=1.6,
+        call_stop_loss=None,
+        put_stop_loss=None,
         exit_time=(15, 29),
         sleep_time=5,
         catch_trend=False,
@@ -2609,6 +2611,10 @@ class Index:
             Put strike offset in percentage terms, by default 0
         stop_loss : float, optional
             Stop loss percentage, by default 1.6
+        call_stop_loss : float, optional
+            Call stop loss percentage, by default None. If None then stop loss is same as stop_loss.
+        put_stop_loss : float, optional
+            Put stop loss percentage, by default None. If None then stop loss is same as stop_loss.
         exit_time : tuple, optional
             Exit time, by default (15, 29)
         sleep_time : int, optional
@@ -2717,6 +2723,13 @@ class Index:
             sl_price = spot_price * sl_multiplier
             trend_sl_hit = False
 
+            notifier(
+                f"{self.name} strangle {sl_type} trend catcher starting. "
+                + f"Placed {qty_in_lots} lots of {strike} {opt_type} at {trend_option.fetch_ltp()}. "
+                + f"Stoploss price: {sl_price}, Underlying Price: {spot_price}",
+                self.webhook_url,
+            )
+
             last_print_time = currenttime()
             print_interval = timedelta(seconds=10)
             while all([currenttime().time() < time(*exit_time), not info_dict["exit_triggers"]["trade_complete"]]):
@@ -2728,9 +2741,9 @@ class Index:
                 if currenttime() - last_print_time > print_interval:
                     last_print_time = currenttime()
                     print(
-                        f"{self.name} {sl_type} trend catcher running.\n"
+                        f"{self.name} {sl_type} trend catcher running\n"
                         + f"Stoploss price: {sl_price}, Underlying Price: {spot_price}\n"
-                        + f"Stoploss hit: {trend_sl_hit}.\n"
+                        + f"Stoploss hit: {trend_sl_hit}\n"
                     )
 
             if trend_sl_hit:
@@ -2827,8 +2840,8 @@ class Index:
         put_avg_price = lookup_and_return(orderbook, 'orderid', put_order_ids, 'averageprice').astype(float).mean()
         total_avg_price = call_avg_price + put_avg_price
 
-        call_stop_loss_price = call_avg_price * stop_loss
-        put_stop_loss_price = put_avg_price * stop_loss
+        call_stop_loss_price = call_avg_price * call_stop_loss if call_stop_loss else call_avg_price * stop_loss
+        put_stop_loss_price = put_avg_price * put_stop_loss if put_stop_loss else put_avg_price * stop_loss
 
         # Logging information and sending notification
         self.log_combined_order(
@@ -2962,11 +2975,11 @@ class Index:
         exit_message = (
             f"{self.name} strangle exited.\n"
             f"Time: {currenttime():%d-%m-%Y %H:%M:%S}\n"
-            f"Underlying LTP: {underlying_ltp}\n"
-            f"Call Price: {call_ltp}\n"
-            f"Put Price: {put_ltp}\n"
-            f"Call SL: {call_sl}\n"
-            f"Put SL: {put_sl}\n"
+            f"Underlying LTP: {shared_info_dict['underlying_ltp']}\n"
+            f"Call Price: {shared_info_dict['call_ltp']}\n"
+            f"Put Price: {shared_info_dict['put_ltp']}\n"
+            f"Call SL: {shared_info_dict['call_sl']}\n"
+            f"Put SL: {shared_info_dict['put_sl']}\n"
             f"Call Exit Price: {shared_info_dict['call_exit_price']}\n"
             f"Put Exit Price: {shared_info_dict['put_exit_price']}\n"
             f"Total Exit Price: {total_exit_price}\n"
@@ -2978,8 +2991,8 @@ class Index:
             "Put exit price": shared_info_dict["put_exit_price"],
             "Total exit price": total_exit_price,
             "Points captured": total_avg_price - total_exit_price,
-            "Call SL": call_sl,
-            "Put SL": put_sl,
+            "Call SL": shared_info_dict["call_sl"],
+            "Put SL": shared_info_dict["put_sl"],
         }
         try:
             self.order_log[order_tag][0].update(exit_dict)
@@ -3201,6 +3214,36 @@ def append_data_to_json(data_dict: defaultdict, file_name: str):
     # Write the updated data back to the JSON file with indentation
     with open(file_name, "w") as file:
         json.dump(data, file, indent=4, default=str)
+
+
+def word_to_num(s):
+    word = {
+        'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+        'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+        'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14,
+        'fifteen': 15, 'sixteen': 16, 'seventeen': 17, 'eighteen': 18, 'nineteen': 19,
+        'twenty': 20, 'thirty': 30, 'forty': 40, 'fifty': 50,
+        'sixty': 60, 'seventy': 70, 'eighty': 80, 'ninety': 90
+    }
+    multiplier = {'thousand': 1000, 'hundred': 100, 'million': 1000000, 'billion': 1000000000}
+
+    words = s.lower().split()
+    if words[0] == 'a':
+        words[0] = 'one'
+    total = 0
+    current = 0
+    for w in words:
+        if w in word:
+            current += word[w]
+        if w in multiplier:
+            current *= multiplier[w]
+        if w == 'and':
+            continue
+        if w == 'thousand' or w == 'million' or w == 'billion':
+            total += current
+            current = 0
+    total += current
+    return total
 
 
 def login(user, pin, apikey, authkey, webhook_url=None):
@@ -3429,10 +3472,31 @@ def place_option_order_and_notify(
 
 # Market Hours
 def markethours():
-    if time(9, 10) < currenttime().time() < time(15, 30):
+    if time(9, 15) <= currenttime().time() <= time(15, 30):
         return True
     else:
         return False
+
+
+def last_market_close_time():
+
+    if currenttime().time() < time(9, 15):
+        wip_time = currenttime() - timedelta(days=1)
+        wip_time = wip_time.replace(hour=15, minute=30, second=0, microsecond=0)
+    elif currenttime().time() > time(15, 30):
+        wip_time = currenttime().replace(hour=15, minute=30, second=0, microsecond=0)
+    else:
+        wip_time = currenttime()
+
+    if wip_time.weekday() not in [5, 6] and wip_time.date() not in holidays:
+        return wip_time
+    else:
+        # Handling weekends and holidays
+        while wip_time.weekday() in [5, 6] or wip_time.date() in holidays:
+            wip_time = wip_time - timedelta(days=1)
+
+    last_close_day_time = wip_time.replace(hour=15, minute=30, second=0, microsecond=0)
+    return last_close_day_time
 
 
 # Defining current time
@@ -3584,12 +3648,12 @@ def fetch_symbol_token(
         ]
         return symbol_token_pairs
 
-    if expiry is None and strike is None and option_type is None:
-        if name in ["BANKNIFTY", "NIFTY", "NIFTY FIN SERVICE"]:
+    if expiry is None and strike is None and option_type is None:  # Cash segment
+        if name in ["BANKNIFTY", "NIFTY", "NIFTY FIN SERVICE"]:  # Index scrips
             symbol, token = scrips.loc[
                 (scrips.name == name) & (scrips.exch_seg == "NSE"), ["symbol", "token"]
             ].values[0]
-        elif name == "FINNIFTY":
+        elif name == "FINNIFTY":  # Specific additional case for finnifty since cash segment price is not available
             futures = scrips.loc[
                 (scrips.name == name) & (scrips.instrumenttype == "FUTIDX"),
                 ["expiry", "symbol", "token"],
@@ -3597,14 +3661,14 @@ def fetch_symbol_token(
             futures["expiry"] = pd.to_datetime(futures["expiry"], format="%d%b%Y")
             futures = futures.sort_values(by="expiry")
             symbol, token = futures.iloc[0][["symbol", "token"]].values
-        else:
+        else:  # For all other equity scrips
             symbol, token = scrips.loc[
                 (scrips.name == name)
                 & (scrips.exch_seg == "NSE")
                 & (scrips.symbol.str.endswith("EQ")),
                 ["symbol", "token"],
             ].values[0]
-    elif expiry is not None and strike is not None and option_type is not None:
+    elif expiry is not None and strike is not None and option_type is not None:  # Options segment
         strike = str(int(strike))  # Handle float strikes, convert to integer first
         symbol = name + expiry + strike + option_type
         token = scrips[scrips.symbol == symbol]["token"].tolist()[0]
@@ -3683,6 +3747,79 @@ def fetchltp(exchange_seg, symbol, token):
                 print(f"Error {attempt} in fetching LTP: {e}")
                 sleep(1)
                 continue
+
+
+def get_historical_prices(
+        interval,
+        last_n_intervals=None,
+        from_date=None,
+        to_date=None,
+        token=None,
+        name=None,
+        expiry=None,
+        strike=None,
+        option_type=None
+):
+
+    """ Available intervals:
+
+        ONE_MINUTE	1 Minute
+        THREE_MINUTE 3 Minute
+        FIVE_MINUTE	5 Minute
+        TEN_MINUTE	10 Minute
+        FIFTEEN_MINUTE	15 Minute
+        THIRTY_MINUTE	30 Minute
+        ONE_HOUR	1 Hour
+        ONE_DAY	1 Day
+
+        """
+
+    if token is None and name is None:
+        raise ValueError("Either name or token must be specified.")
+
+    if last_n_intervals is None and from_date is None:
+        raise ValueError("Either last_n_intervals or from_date must be specified.")
+
+    if last_n_intervals is not None and from_date is not None:
+        raise ValueError("Only one of last_n_intervals or from_date must be specified.")
+
+    if to_date is None:
+        to_date = last_market_close_time()
+    else:
+        to_date = pd.to_datetime(to_date)
+
+    if from_date is None and last_n_intervals is not None:
+        interval_digit, interval_unit = interval.lower().split("_")
+        interval_unit = interval_unit + "s" if interval_unit[-1] != "s" else interval_unit
+        interval_digit = word_to_num(interval_digit)
+        time_delta = interval_digit*last_n_intervals
+        from_date = to_date - timedelta(**{interval_unit: time_delta})
+    else:
+        from_date = pd.to_datetime(from_date)
+
+    to_date = to_date.strftime("%Y-%m-%d %H:%M")
+    from_date = from_date.strftime("%Y-%m-%d %H:%M")
+
+    if token is None:
+        _, token = fetch_symbol_token(name, expiry, strike, option_type)
+
+    exchange_seg = scrips.loc[scrips.token == token, "exch_seg"].values[0]
+
+    historic_param = {
+        "exchange": exchange_seg,
+        "symboltoken": token,
+        "interval": interval,
+        "fromdate": from_date,
+        "todate": to_date,
+    }
+    data = obj.getCandleData(historic_param)
+    data = pd.DataFrame(data["data"])
+    data.set_index(pd.Series(data.iloc[:, 0], name='date'), inplace=True)
+    data.index = pd.to_datetime(data.index)
+    data.index = data.index.tz_localize(None)
+    data.drop(data.columns[0], axis=1, inplace=True)
+    data.columns = ["open", "high", "low", "close", "volume"]
+    return data
 
 
 def fetchpreviousclose(exchange_seg, symbol, token):

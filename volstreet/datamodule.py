@@ -4,6 +4,7 @@ from eod import EodHistoricalData
 import pandas as pd
 from dateutil.relativedelta import relativedelta, MO, TU, WE, TH, FR
 import numpy as np
+from datetime import datetime, timedelta
 
 
 class DataClient:
@@ -13,19 +14,27 @@ class DataClient:
         self.api_key = api_key
         self.client = EodHistoricalData(api_key=api_key)
 
-    def get_data(self, symbol, from_date="2011-01-01", return_columns=None):
+    @staticmethod
+    def parse_symbol(symbol):
+
         symbol_dict = {
             "NIFTY": "NSEI.INDX",
             "BANKNIFTY": "NSEBANK.INDX",
             "FINNIFTY": "CNXFIN.INDX",
         }
         symbol = symbol.upper()
-        name = symbol.split(".")[0]
         if "." not in symbol:
             if symbol in symbol_dict:
                 symbol = symbol_dict[symbol]
             else:
                 symbol = symbol + ".NSE"
+        return symbol
+
+    def get_data(self, symbol, from_date="2011-01-01", return_columns=None):
+
+        name = symbol.split(".")[0] if "." in symbol else symbol
+
+        symbol = self.parse_symbol(symbol)
 
         if return_columns is None:
             return_columns = ["open", "close", "gap", "intra", "abs_gap", "abs_intra"]
@@ -42,6 +51,36 @@ class DataClient:
         df["abs_gap"] = abs(df.gap)
         df["abs_intra"] = abs(df.intra)
         df = df.loc[:, return_columns]
+        df.name = name
+        return df
+
+    def get_intraday_data(self, symbol, interval, from_date="2011-01-01", return_columns=None):
+
+        name = symbol.split(".")[0] if "." in symbol else symbol
+
+        symbol = self.parse_symbol(symbol)
+
+        if return_columns is None:
+            return_columns = ['open', 'high', 'low', 'close']
+
+        resp_list = []
+        from_date = pd.to_datetime(from_date)
+        while datetime.now().date() > from_date.date():
+            to_date = from_date + timedelta(days=120)
+            resp = self.client.get_prices_intraday(
+                symbol, interval=interval,
+                from_=str(int(from_date.timestamp())),
+                to=str(int(to_date.timestamp()))
+            )
+
+            resp_list.extend(resp)
+            from_date += timedelta(days=120)
+
+        df = pd.DataFrame(resp_list)
+        df.index = pd.to_datetime(df['datetime'])
+        df = df.drop_duplicates()
+        df.index = df.index + timedelta(hours=5, minutes=30)
+        df = df[return_columns]
         df.name = name
         return df
 
