@@ -2818,6 +2818,7 @@ class Index:
 
         # Placing the main order
         strangle = Strangle(call_strike=call_strike, put_strike=put_strike, underlying=self.name, expiry=expiry)
+        call_ltp, put_ltp = strangle.fetch_ltp()
         call_order_ids, put_order_ids = strangle.place_order(
             "SELL", quantity_in_lots, prices="LIMIT", order_tag=order_tag
         )
@@ -2836,8 +2837,12 @@ class Index:
         )
 
         # Calculating average prices
-        call_avg_price = lookup_and_return(orderbook, 'orderid', call_order_ids, 'averageprice').astype(float).mean()
-        put_avg_price = lookup_and_return(orderbook, 'orderid', put_order_ids, 'averageprice').astype(float).mean()
+        def get_avg_price(book, order_ids, ltp):
+            prices = lookup_and_return(book, ['orderid', 'status'], [order_ids, 'complete'], 'averageprice')
+            return ltp if not isinstance(prices, np.ndarray) else prices.astype(float).mean()
+
+        call_avg_price = get_avg_price(orderbook, call_order_ids, call_ltp)
+        put_avg_price = get_avg_price(orderbook, put_order_ids, put_ltp)
         total_avg_price = call_avg_price + put_avg_price
 
         call_stop_loss_price = call_avg_price * call_stop_loss if call_stop_loss else call_avg_price * stop_loss
@@ -2899,7 +2904,6 @@ class Index:
             put_stop_loss_order_ids = None
 
         # Setting up shared info dict
-        call_ltp, put_ltp = strangle.fetch_ltp()
         shared_info_dict = {
             "traded_strangle": strangle,
             "call_avg_price": call_avg_price,
@@ -3875,6 +3879,13 @@ def findstrike(x, base):
     return int(number)
 
 
+def custom_round(x, base=0.05):
+    num = base * round(x / base)
+    if num == 0:
+        num = base
+    return round(num, 2)
+
+
 def splice_orders(quantity_in_lots, freeze_qty):
     if quantity_in_lots > freeze_qty:
         loops = int(quantity_in_lots / freeze_qty)
@@ -4151,7 +4162,7 @@ def place_order(symbol, token, qty, action, price, order_tag="", stop_loss_order
         params.update({
             "variety": "NORMAL",
             "ordertype": order_type,
-            "price": round(execution_price, 1)
+            "price": custom_round(execution_price)
         })
 
     for attempt in range(1, 4):
