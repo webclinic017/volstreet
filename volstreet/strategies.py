@@ -186,6 +186,7 @@ def intraday_trend_on_nifty(
     webhook_url=None,
     start_time=(9, 15, 55),
     exit_time=(15, 27),
+    sleep_time=20,
 ):
     user, pin, apikey, authkey, discord_webhook_url = get_user_data(
         client, user, pin, apikey, authkey, webhook_url
@@ -233,7 +234,7 @@ def intraday_trend_on_nifty(
         if vs.currenttime() > last_printed_time + vs.timedelta(minutes=1):
             print(f"Nifty trender: {movement:0.2f} movement.")
             last_printed_time = vs.currenttime()
-        sleep(1)
+        sleep(sleep_time)
 
     if vs.currenttime().time() > scan_end_time:
         vs.notifier("Nifty trender exiting due to time.", discord_webhook_url)
@@ -263,7 +264,7 @@ def intraday_trend_on_nifty(
             stop_loss_hit = nifty.fetch_ltp() < stop_loss_price
         else:
             stop_loss_hit = nifty.fetch_ltp() > stop_loss_price
-        sleep(3)
+        sleep(sleep_time)
     nifty.place_synthetic_fut_order(
         atm_strike,
         nifty.current_expiry,
