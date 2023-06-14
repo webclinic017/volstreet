@@ -169,7 +169,42 @@ def main():
     )
 
 
-def iv_curve_adjustor(movement, time_to_expiry, iv=1, spot=100, strike=100, _print_details=False):
+def iv_transformer_coeffs(tte):
+    adjuster = 3 if tte < (0.8 / 365) else 1
+    dfs2 = 1 / ((tte ** 1.2) * adjuster)
+    dfs2 = min(dfs2, 20000)
+
+    dfs = 1 / ((tte ** 0.45) * 5)
+    dfs = min(dfs, 5)
+    dfs = -6 + dfs
+    return dfs2, dfs, .97
+
+
+def iv_transformer_coeffs_wip(tte):
+
+    # distance squared coefficient
+    dfs2 = 3270.27*np.exp(-384.38*tte) + 100
+    dfs2 = min(dfs2, 20000)
+
+    # distance coefficient
+    if tte < 0.26/365:
+        dfs = 1
+    else:
+        dfs = 1 / ((tte ** 0.45) * 5)
+        dfs = min(dfs, 5)
+        dfs = -6 + dfs
+
+    # intercept
+    if tte < 3/(24*365):
+        intercept = 1.07
+    elif tte < 0.27/365:
+        intercept = 1
+    else:
+        intercept = 0.98
+    return dfs2, dfs, intercept
+
+
+def iv_curve_adjustor(movement, time_to_expiry, iv: int | tuple = 1, spot=100, strike=100, _print_details=False):
 
     """
     This function returns the adjusted implied volatility accounting for the curve effect.
@@ -182,17 +217,7 @@ def iv_curve_adjustor(movement, time_to_expiry, iv=1, spot=100, strike=100, _pri
     :return: adjusted implied volatility for the strike after the movement
     """
 
-    def iv_transformer_coeffs(tte):
-        adjuster = 3 if tte < (0.8 / 365) else 1
-        dfs2 = 1 / ((tte ** 1.2) * adjuster)
-        dfs2 = min(dfs2, 20000)
-
-        dfs = 1 / ((tte ** 0.45) * 5)
-        dfs = min(dfs, 5)
-        dfs = -6 + dfs
-        return dfs2, dfs, .97
-
-    coefs = iv_transformer_coeffs(time_to_expiry)
+    coefs = iv_transformer_coeffs_wip(time_to_expiry)
     current_diff = (strike/spot - 1)
     current_iv_multiple = coefs[0] * current_diff ** 2 + coefs[1] * current_diff + coefs[2]
     atm_iv = iv / current_iv_multiple
@@ -233,6 +258,9 @@ def target_movement(
     estimated_movement_points = (target_price - current_price) / delta_
     estimated_movement = estimated_movement_points / current_spot
     timeleft = timeleft - (time_delta / 525600) if time_delta else timeleft
+    if timeleft < 0.0008:  # On expiry day
+        vol_multiple = 2 - (1401.74 * timeleft)
+        vol = vol * vol_multiple
     modified_vol = iv_curve_adjustor(estimated_movement, timeleft, iv=vol, spot=current_spot, strike=strike)
 
     if _print_details:

@@ -11,7 +11,7 @@ from threading import Thread
 from volstreet.SmartWebSocketV2 import SmartWebSocketV2
 from volstreet.constants import scrips, holidays, symbol_df, logger
 from volstreet import blackscholes as bs, datamodule as dm
-from collections import defaultdict
+from collections import defaultdict, deque
 import yfinance as yf
 from fuzzywuzzy import process
 import re
@@ -2618,7 +2618,7 @@ class Index:
         exit_time : tuple, optional
             Exit time, by default (15, 29)
         sleep_time : int, optional
-            Sleep time in seconds for updating prices, by default 60
+            Sleep time in seconds for updating prices, by default 5
         catch_trend : bool, optional
             Catch trend or not, by default False
         trend_qty_ratio : int, optional
@@ -2638,18 +2638,33 @@ class Index:
             p_avg_price = info_dict["put_avg_price"]
             traded_strangle = info_dict["traded_strangle"]
 
+            # Price deque
+            n_prices = max(int(30/sleep_time), 1)  # Hard coded 30-second price window for now
+            last_n_prices = {"call": deque(maxlen=n_prices), "put": deque(maxlen=n_prices)}
+
             last_print_time = currenttime()
             last_log_time = currenttime()
             last_notify_time = currenttime()
             print_interval = timedelta(seconds=5)
-            log_interval = timedelta(minutes=5)
-            notify_interval = timedelta(minutes=60)
+            log_interval = timedelta(minutes=60)
+            notify_interval = timedelta(minutes=180)
+
             while not info_dict["exit_triggers"]["trade_complete"]:
+
+                # Fetching prices
                 spot_price = self.fetch_ltp()
                 c_ltp, p_ltp = traded_strangle.fetch_ltp()
                 info_dict["underlying_ltp"] = spot_price
                 info_dict["call_ltp"] = c_ltp
                 info_dict["put_ltp"] = p_ltp
+                last_n_prices["call"].append(c_ltp)
+                last_n_prices["put"].append(p_ltp)
+                c_ltp_avg = sum(last_n_prices["call"])/len(last_n_prices["call"]) if last_n_prices["call"] else c_ltp
+                p_ltp_avg = sum(last_n_prices["put"])/len(last_n_prices["put"]) if last_n_prices["put"] else p_ltp
+                info_dict["call_ltp_avg"] = c_ltp_avg
+                info_dict["put_ltp_avg"] = p_ltp_avg
+
+                # Calculate IV
                 call_iv, put_iv, avg_iv = strangle_iv(
                     callprice=c_ltp,
                     putprice=p_ltp,
@@ -2682,6 +2697,8 @@ class Index:
                     f"Call Price: {c_ltp}\n"
                     f"Put Price: {p_ltp}\n"
                     f"MTM Price: {mtm_price}\n"
+                    f"Call last n avg: {c_ltp_avg}\n"
+                    f"Put last n avg: {p_ltp_avg}\n"
                     f"IVs: {call_iv}, {put_iv}, {avg_iv}\n"
                     f"Call SL: {info_dict['call_sl']}\n"
                     f"Put SL: {info_dict['put_sl']}\n"
@@ -2763,7 +2780,7 @@ class Index:
         def check_for_stop_loss(info_dict, side, sl_order_ids=None):
 
             if sl_order_ids is None:  # Not using SL orders
-                sl = info_dict[f"{side}_ltp"] > info_dict[f"{side}_stop_loss_price"]
+                sl = info_dict[f"{side}_ltp_avg"] > info_dict[f"{side}_stop_loss_price"]
 
             else:  # Using SL orders
                 sl = False
@@ -2805,7 +2822,7 @@ class Index:
                     )
                     info_dict[f'{other_sl_type}_exit_price'] = other_exit_price
                     break
-                sleep(sleep_time)
+                sleep(1)
 
         # Setting strikes and expiry
         order_tag = "Intraday Strangle"
@@ -2922,6 +2939,7 @@ class Index:
 
         position_monitor_thread = Thread(target=position_monitor, args=(shared_info_dict,))
         position_monitor_thread.start()
+        sleep(3)  # To ensure that the position monitor thread has started
 
         # Wait for exit time or both stop losses to hit (Main Loop)
         while all([currenttime().time() < time(*exit_time)]):
@@ -2933,7 +2951,7 @@ class Index:
             if shared_info_dict["put_sl"]:
                 process_stop_loss(shared_info_dict, "put")
                 break
-            sleep(sleep_time)
+            sleep(1)
 
         # Out of the while loop, so exit time reached or both stop losses hit
 
@@ -3880,6 +3898,10 @@ def findstrike(x, base):
 
 
 def custom_round(x, base=0.05):
+
+    if x == 0:
+        return 0
+
     num = base * round(x / base)
     if num == 0:
         num = base
