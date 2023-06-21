@@ -60,7 +60,7 @@ class PriceFeed(SmartWebSocketV2):
         self.webhook_url = webhook_url
         self.index_option_chains_subscribed = []
         self.correlation_id = correlation_id
-        self.finnifty_index = Index("FINNIFTY")
+        self.finnifty_index = Index("FINNIFTY")  # Finnifty temp fix
 
     def start_websocket(self):
         def on_open(wsapp):
@@ -107,7 +107,7 @@ class PriceFeed(SmartWebSocketV2):
             scrips.loc[scrips.token == token]["symbol"].values[0]: value
             for token, value in self.price_dict.items()
         }
-        new_price_dict.update({"FINNIFTY": {"ltp": self.finnifty_index.fetch_ltp()}})
+        new_price_dict.update({"FINNIFTY": {"ltp": self.finnifty_index.fetch_ltp()}})  # Finnifty temp fix
         return new_price_dict
 
     def add_options(self, *underlyings, range_of_strikes=10, expiries=None, mode=1):
@@ -516,7 +516,7 @@ class Strangle:
         self.call_strike = self.call_option.strike
         self.put_strike = self.put_option.strike
         self.underlying = underlying
-        self.underlying_exchange = "NFO" if self.underlying == "FINNIFTY" else "NSE"
+        self.underlying_exchange = "NFO" if self.underlying == "FINNIFTY" else "NSE"  # Finnifty temp fix
         self.expiry = expiry
         self.call_symbol, self.call_token = self.call_option.fetch_symbol_token()
         self.put_symbol, self.put_token = self.put_option.fetch_symbol_token()
@@ -595,6 +595,50 @@ class Strangle:
 class Straddle(Strangle):
     def __init__(self, strike, underlying, expiry):
         super().__init__(strike, strike, underlying, expiry)
+
+
+class SyntheticFuture(Strangle):
+    def __init__(self, strike, underlying, expiry):
+        super().__init__(strike, strike, underlying, expiry)
+
+    def place_order(self, transaction_type, quantity_in_lots, prices="LIMIT", order_tag=""):
+        if isinstance(prices, (tuple, list, np.ndarray)):
+            call_price, put_price = prices
+        elif prices.upper() == "LIMIT":
+            call_price, put_price = self.fetch_ltp()
+            c_modifier, p_modifier = (1.05, 0.95) if transaction_type.upper() == "BUY" else (0.95, 1.05)
+            call_price, put_price = call_price * c_modifier, put_price * p_modifier
+        elif prices.upper() == "MARKET":
+            call_price = put_price = prices
+        else:
+            raise ValueError("Prices must be either 'LIMIT' or 'MARKET' or a tuple of prices")
+
+        call_transaction_type = "BUY" if transaction_type.upper() == "BUY" else "SELL"
+        put_transaction_type = "SELL" if transaction_type.upper() == "BUY" else "BUY"
+
+        spliced_orders = splice_orders(quantity_in_lots, self.freeze_qty_in_lots)
+        call_order_ids = []
+        put_order_ids = []
+        for qty in spliced_orders:
+            call_order_id = place_order(
+                self.call_symbol,
+                self.call_token,
+                qty * self.lot_size,
+                call_transaction_type,
+                call_price,
+                order_tag=order_tag
+            )
+            put_order_id = place_order(
+                self.put_symbol,
+                self.put_token,
+                qty * self.lot_size,
+                put_transaction_type,
+                put_price,
+                order_tag=order_tag
+            )
+            call_order_ids.append(call_order_id)
+            put_order_ids.append(put_order_id)
+        return call_order_ids, put_order_ids
 
 
 class SyntheticArbSystem:
@@ -853,7 +897,7 @@ class Index:
         elif self.name == "NIFTY":
             self.base = 50
             self.exchange_type = 1
-        elif self.name == "FINNIFTY":
+        elif self.name == "FINNIFTY":  # Finnifty temp fix
             self.base = 50
             self.exchange_type = 2
         else:
@@ -962,7 +1006,7 @@ class Index:
 
     def fetch_ltp(self):
         """Fetch LTP of the index. Uses futures for FINNIFTY"""
-        if self.name == "FINNIFTY":
+        if self.name == "FINNIFTY":  # Finnifty temp fix
             ltp = fetchltp("NFO", self.symbol, self.token)
             self.ltp = spot_price_from_future(
                 ltp, self.spot_future_rate, timetoexpiry(self.fut_expiry)
@@ -2754,7 +2798,7 @@ class Index:
                 trend_sl_hit = spot_price < sl_price if sl_type == "call" else spot_price > sl_price
                 if trend_sl_hit:
                     break
-                sleep(1)
+                sleep(sleep_time)
                 if currenttime() - last_print_time > print_interval:
                     last_print_time = currenttime()
                     print(
@@ -3671,11 +3715,16 @@ def fetch_symbol_token(
         return symbol_token_pairs
 
     if expiry is None and strike is None and option_type is None:  # Cash segment
-        if name in ["BANKNIFTY", "NIFTY", "NIFTY FIN SERVICE"]:  # Index scrips
-            symbol, token = scrips.loc[
-                (scrips.name == name) & (scrips.exch_seg == "NSE"), ["symbol", "token"]
-            ].values[0]
-        elif name == "FINNIFTY":  # Specific additional case for finnifty since cash segment price is not available
+
+        if name in ["NIFTY", "BANKNIFTY"]:  # Index scrips
+            filtered_scrips = scrips.loc[
+                (scrips.name == name) & (scrips.exch_seg == "NSE") & (scrips.instrumenttype != "AMXIDX")
+            ]   # Temp fix for AMXIDX
+            # print(f'Length of filtered scrips: {len(filtered_scrips)}')
+            assert len(filtered_scrips) == 1, "More than one index scrip found for name."
+            symbol, token = filtered_scrips[["symbol", "token"]].values[0]
+
+        elif name == "FINNIFTY":  # Finnifty temp fix
             futures = scrips.loc[
                 (scrips.name == name) & (scrips.instrumenttype == "FUTIDX"),
                 ["expiry", "symbol", "token"],
@@ -3683,17 +3732,21 @@ def fetch_symbol_token(
             futures["expiry"] = pd.to_datetime(futures["expiry"], format="%d%b%Y")
             futures = futures.sort_values(by="expiry")
             symbol, token = futures.iloc[0][["symbol", "token"]].values
+
         else:  # For all other equity scrips
-            symbol, token = scrips.loc[
+            filtered_scrips = scrips.loc[
                 (scrips.name == name)
                 & (scrips.exch_seg == "NSE")
-                & (scrips.symbol.str.endswith("EQ")),
-                ["symbol", "token"],
-            ].values[0]
+                & (scrips.symbol.str.endswith("EQ"))
+            ]
+            assert len(filtered_scrips) == 1, "More than one equity scrip found for name."
+            symbol, token = filtered_scrips[["symbol", "token"]].values[0]
+
     elif expiry is not None and strike is not None and option_type is not None:  # Options segment
         strike = str(int(strike))  # Handle float strikes, convert to integer first
         symbol = name + expiry + strike + option_type
         token = scrips[scrips.symbol == symbol]["token"].tolist()[0]
+
     else:
         raise ValueError("Invalid arguments")
 
@@ -4178,7 +4231,7 @@ def place_order(symbol, token, qty, action, price, order_tag="", stop_loss_order
     else:
         order_type, execution_price = ("MARKET", 0) if price == "MARKET" else ("LIMIT", price)
         if order_type == "LIMIT":
-            if execution_price < 10 and qty < 4000:
+            if execution_price < 10 and qty < 6000:
                 execution_price = np.ceil(price) if action == "BUY" else max(np.floor(price), 0.05)
 
         params.update({
