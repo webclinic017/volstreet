@@ -23,7 +23,12 @@ import traceback
 global login_data, obj
 
 LARGE_ORDER_THRESHOLD = 10
-ERROR_NOTIFICATION_URL = None
+ERROR_NOTIFICATION_URL = {'url': None}
+
+
+def set_error_notification_url(url):
+    global ERROR_NOTIFICATION_URL
+    ERROR_NOTIFICATION_URL['url'] = url
 
 
 def log_errors(func):
@@ -34,7 +39,8 @@ def log_errors(func):
         except Exception as e:
             logger.error(f"Error in function {func.__name__}: {e}\nTraceback:{traceback.format_exc()}")
             notifier(
-                f'Error in function {func.__name__}: {e}\nTraceback:{traceback.format_exc()}', ERROR_NOTIFICATION_URL
+                f'Error in function {func.__name__}: {e}\nTraceback:{traceback.format_exc()}',
+                ERROR_NOTIFICATION_URL['url']
             )
             raise e
     return wrapper
