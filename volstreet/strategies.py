@@ -193,7 +193,7 @@ def intraday_trend_on_nifty(
     )
 
     if vs.currenttime().date() in vs.holidays:
-        vs.notifier("Today is a holiday. Exiting.")
+        vs.notifier("Today is a holiday. Exiting.", discord_webhook_url)
         exit()
 
     vs.login(
@@ -278,6 +278,51 @@ def intraday_trend_on_nifty(
         f"{stop_loss_message}Nifty trender exited. Nifty at {nifty.fetch_ltp()}.",
         discord_webhook_url,
     )
+
+
+def intraday_trend_on_indices(
+    indices,
+    quantity_in_lots,
+    client=None,
+    user=None,
+    pin=None,
+    apikey=None,
+    authkey=None,
+    webhook_url=None,
+    start_time=(9, 15, 55),
+    exit_time=(15, 27),
+    sleep_time=20,
+):
+
+    user, pin, apikey, authkey, discord_webhook_url = get_user_data(
+        client, user, pin, apikey, authkey, webhook_url
+    )
+
+    if vs.currenttime().date() in vs.holidays:
+        vs.notifier("Today is a holiday hence exiting.", discord_webhook_url)
+        exit()
+
+    vs.login(
+        user=user,
+        pin=pin,
+        apikey=apikey,
+        authkey=authkey,
+        webhook_url=discord_webhook_url,
+    )
+
+    threads = []
+    for index_symbol in indices:
+        index = vs.Index(index_symbol, webhook_url=discord_webhook_url)
+        thread = threading.Thread(
+            target=index.intraday_trend, args=(quantity_in_lots, start_time, exit_time, sleep_time)
+        )
+        threads.append(thread)
+
+    for thread in threads:
+        thread.start()
+
+    for thread in threads:
+        thread.join()
 
 
 def index_vs_constituents(

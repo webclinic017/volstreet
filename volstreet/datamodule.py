@@ -1,10 +1,19 @@
 import volstreet as vs
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.expected_conditions import url_changes
+from kiteconnect import KiteConnect
+from time import sleep
+from functools import partial
+import pyotp
 from volstreet.exceptions import ApiKeyNotFound
 from eod import EodHistoricalData
 import pandas as pd
 from dateutil.relativedelta import relativedelta, MO, TU, WE, TH, FR
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 
 
 class DataClient:
@@ -19,8 +28,14 @@ class DataClient:
 
         symbol_dict = {
             "NIFTY": "NSEI.INDX",
+            "NIFTY 50": "NSEI.INDX",
+            "NIFTY50" : "NSEI.INDX",
             "BANKNIFTY": "NSEBANK.INDX",
+            "NIFTY BANK": "NSEBANK.INDX",
+            "NIFTYBANK": "NSEBANK.INDX",
             "FINNIFTY": "CNXFIN.INDX",
+            "NIFTY FIN SERVICE": "CNXFIN.INDX",
+            "VIX": "NIFVIX.INDX",
         }
         symbol = symbol.upper()
         if "." not in symbol:
@@ -259,19 +274,26 @@ def ratio_analysis(
     return ratio_summary
 
 
-def get_summary_ratio(target_symbol, benchmark_symbol, frequency='D', periods_to_avg=50):
+def get_summary_ratio(target_symbol, benchmark_symbol, frequency='D', periods_to_avg=50, client=None):
 
     try:
-        dc = DataClient(__import__('os').getenv('EOD_API_KEY'))
-    except ApiKeyNotFound:
-        return None
+        if client is None:
+            try:
+                dc = DataClient(__import__('os').getenv('EOD_API_KEY'))
+            except ApiKeyNotFound:
+                return None
+        else:
+            dc = client
 
-    benchmark = dc.get_data(benchmark_symbol)
-    target = dc.get_data(target_symbol)
-    benchmark = analyser(benchmark, frequency=frequency)
-    target = analyser(target, frequency=frequency)
-    ratio = ratio_analysis(target, benchmark, periods_to_avg=periods_to_avg)
-    return ratio.loc['Summary', 'Ratio']
+        benchmark = dc.get_data(benchmark_symbol)
+        target = dc.get_data(target_symbol)
+        benchmark = analyser(benchmark, frequency=frequency)
+        target = analyser(target, frequency=frequency)
+        ratio = ratio_analysis(target, benchmark, periods_to_avg=periods_to_avg)
+        return ratio.loc['Summary', 'Ratio']
+    except Exception as e:
+        vs.logger.error(f'Error in get_summary_ratio: {e}')
+        return None
 
 
 @retain_name
@@ -662,3 +684,272 @@ def get_index_vs_constituents_recent_vols(
             ["index_abs_change", "sum_constituent_movement", "ratio_of_movements"]
         ]
         return summary_df
+
+
+def get_greenlit_kite(
+        kite_api_key,
+        kite_api_secret,
+        kite_user_id,
+        kite_password,
+        kite_auth_key,
+        chrome_path=None
+):
+    if chrome_path is None:
+        driver = webdriver.Chrome()
+    else:
+        driver = webdriver.Chrome(chrome_path)
+
+    authkey_obj = pyotp.TOTP(kite_auth_key)
+    kite = KiteConnect(api_key=kite_api_key)
+    login_url = kite.login_url()
+
+    driver.get(login_url)
+    wait = WebDriverWait(driver, 10)  # waits for up to 10 seconds
+
+    userid = wait.until(EC.presence_of_element_located((By.ID, 'userid')))
+    userid.send_keys(kite_user_id)
+
+    password = wait.until(EC.presence_of_element_located((By.ID, 'password')))
+    password.send_keys(kite_password)
+
+    submit = wait.until(EC.presence_of_element_located((By.CLASS_NAME, 'button-orange')))
+    submit.click()
+
+    sleep(10)  # wait for the OTP input field to be clickable
+    otp_input = wait.until(EC.element_to_be_clickable((By.TAG_NAME, 'input')))
+    otp_input.send_keys(authkey_obj.now())
+
+    # wait until the URL changes
+    wait.until(url_changes(driver.current_url))
+
+    # now you can safely get the current URL
+    current_url = driver.current_url
+
+    split_url = current_url.split('=')
+    request_token = None
+    for i, string in enumerate(split_url):
+        if 'request_token' in string:
+            request_token = split_url[i + 1]
+            request_token = request_token.split('&')[0] if '&' in request_token else request_token
+            break
+
+    driver.quit()
+
+    if request_token is None:
+        raise Exception('Request token not found')
+
+    data = kite.generate_session(request_token, api_secret=kite_api_secret)
+    kite.set_access_token(data["access_token"])
+
+    return kite
+
+
+def get_1m_data(kite, symbol, path='C:\\Users\\Administrator\\'):
+
+    def fetch_minute_data_from_kite(_kite, _token, _from_date, _to_date):
+        date_format = '%Y-%m-%d %H:%M:%S'
+        _prices = _kite.historical_data(_token, from_date=_from_date.strftime(date_format),
+                                        to_date=_to_date.strftime(date_format), interval='minute')
+        return _prices
+
+    instruments = kite.instruments(exchange='NSE')
+    token = [instrument['instrument_token'] for instrument in instruments if instrument['tradingsymbol'] == symbol][0]
+
+    try:
+        main_df = pd.read_csv(
+            f'{path}{symbol}_onemin_prices.csv', index_col=0, parse_dates=True
+        )
+        from_date = main_df.index[-1] + timedelta(minutes=1)
+    except FileNotFoundError:
+        print(f"No existing data for {symbol}, starting from scratch.")
+        main_df = False
+        from_date = datetime(2015, 1, 1, 9, 16)
+
+    end_date = datetime.now()
+    mainlist = []
+
+    fetch_data_partial = partial(fetch_minute_data_from_kite, kite, token)
+
+    while from_date < end_date:
+        to_date = from_date + timedelta(days=60)
+        prices = fetch_data_partial(from_date, to_date)
+        if len(prices) < 2:
+            print(f'No data for {from_date.strftime("%Y-%m-%d %H:%M:%S")} to {to_date.strftime("%Y-%m-%d %H:%M:%S")}')
+            return None
+        mainlist.extend(prices)
+        from_date += timedelta(days=60)
+
+    df = pd.DataFrame(mainlist).set_index('date')
+    df.index = df.index.tz_localize(None)
+    df = df[~df.index.duplicated(keep='first')]
+    df = df[(df.index.time >= time(9, 15)) & (df.index.time <= time(15, 30))]
+    df.to_csv(f'{path}{symbol}_onemin_prices.csv', mode='a', header=not isinstance(main_df, pd.DataFrame))
+    print(f'Finished fetching data for {symbol}. Fetched data from {df.index[0]} to {df.index[-1]}')
+    full_df = pd.concat([main_df, df]) if isinstance(main_df, pd.DataFrame) else df
+    return full_df
+
+
+def backtest_intraday_trend(index_symbol, trend_threshold=1, eod_client=None):
+
+    one_min_df = pd.read_csv(f'data\\{index_symbol}_onemin_prices.csv')
+    one_min_df['date'] = pd.to_datetime(one_min_df['date'])
+    one_min_df = one_min_df[(one_min_df['date'].dt.time > time(9, 15)) & (one_min_df['date'].dt.time < time(15, 30))]
+
+    unavailable_dates = [
+        datetime(2015, 2, 28).date(),
+        datetime(2016, 10, 30).date(),
+        datetime(2019, 10, 27).date(),
+        datetime(2020, 2, 1).date(),
+        datetime(2020, 11, 14).date()
+    ]
+
+    # Fetching vix data and calculating beta
+    if eod_client is None:
+        client = DataClient(api_key=__import__("os").environ.get("EOD_API_KEY"))
+    else:
+        client = eod_client
+
+    vix = client.get_data("VIX", return_columns=["open", "close"])
+    vix = vix.resample('B').ffill()
+    beta = get_summary_ratio(index_symbol, 'nifty', client=client)
+    vix['open'] = vix['open'] * beta
+    vix['close'] = vix['close'] * beta
+
+    one_min_df.drop(one_min_df[one_min_df['date'].dt.date.isin(unavailable_dates)].index, inplace=True)
+    open_prices = one_min_df.groupby(one_min_df['date'].dt.date).close.first().to_frame()
+    open_data = open_prices.merge(vix['open'].to_frame(), left_index=True, right_index=True)
+    open_data['threshold_movement'] = (open_data['open'] / 48) * trend_threshold
+    one_min_df[['day_open', 'open_vix', 'threshold_movement']] = open_data.loc[one_min_df['date'].dt.date].values
+    one_min_df['change_from_open'] = ((one_min_df['close']/one_min_df['day_open']) - 1)*100
+
+    def calculate_daily_trade_data(group):
+        result_dict = {
+            'returns': 0,
+            'trigger_time': np.nan,
+            'trigger_price': np.nan,
+            'stop_loss_price': np.nan
+        }
+        # Find the first index where the absolute price change crosses the threshold
+        idx = group[abs(group['change_from_open']) >= group['threshold_movement']].first_valid_index()
+        if idx is not None:
+            # Record the price and time of crossing the threshold
+            cross_price = group.loc[idx, 'close']
+            cross_time = group.loc[idx, 'date']
+
+            # Determine the direction of the movement
+            direction = np.sign(group.loc[idx, 'change_from_open'])
+
+            # Calculate the stoploss price
+            stoploss_price = cross_price * (1 - 0.003 * direction)
+
+            # Check if the stoploss was breached after crossing the threshold
+            future_prices = group.loc[idx:, 'close']
+            if (
+                    direction == 1 and future_prices.min() <= stoploss_price) \
+                    or (direction == -1 and future_prices.max() >= stoploss_price
+            ):
+                result_dict['returns'] = -0.30
+            else:
+                # Return the change from the entry price to the last price of the day
+                if direction == 1:
+                    result_dict['returns'] = ((group['close'].iloc[-1] - cross_price) / cross_price)*100
+                else:
+                    result_dict['returns'] = ((group['close'].iloc[-1] - cross_price) / cross_price)*-100
+
+            result_dict.update({
+                'trigger_time': cross_time,
+                'trigger_price': cross_price,
+                'stop_loss_price': stoploss_price
+            })
+        return result_dict
+
+    # Applying the function to each day's worth of data
+    returns = one_min_df.groupby(one_min_df['date'].dt.date).apply(calculate_daily_trade_data)
+    returns = returns.apply(pd.Series)
+
+    # creating a new column with the date
+    one_min_df.rename(columns={'date': 'timestamp'}, inplace=True)
+    one_min_df['date'] = one_min_df['timestamp'].dt.date
+
+    # merging the returns with the original data
+    one_min_df = one_min_df.merge(returns, left_on='date', right_index=True)
+
+    return one_min_df
+
+
+def daywise_returns_of_intraday_trend(df):
+
+    daywise_summary = df.groupby(df["timestamp"].dt.date).agg(
+        {'returns': 'first', 'trigger_time': 'first', 'trigger_price': 'first', 'stop_loss_price': 'first'})
+    daywise_summary.index = pd.to_datetime(daywise_summary.index)
+    daywise_summary = nav_drawdown_analyser(daywise_summary, column_to_convert='returns', profit_in_pct=True)
+    return daywise_summary
+
+
+def calculate_intraday_return_drivers(symbol_one_min_df, day_wise_summary_df, rolling_days=60):
+
+    symbol_one_min_df = symbol_one_min_df[
+        (symbol_one_min_df['date'].dt.time > time(9, 15)) & (symbol_one_min_df['date'].dt.time < time(15, 30))
+        ]
+    minute_vol = symbol_one_min_df.groupby(symbol_one_min_df.index.date).apply(
+        lambda x: x['close'].pct_change().abs().mean() * 100).to_frame()
+    minute_vol.index = pd.to_datetime(minute_vol.index)
+    minute_vol.columns = ['minute_vol']
+
+    open_to_close_trend = symbol_one_min_df.close.groupby(symbol_one_min_df.index.date).apply(
+        lambda x: (x.iloc[-1] / x.iloc[2] - 1) * 100).abs().to_frame()
+    open_to_close_trend.index = pd.to_datetime(open_to_close_trend.index)
+    open_to_close_trend.columns = ['open_to_close_trend']
+    drivers_of_returns = minute_vol.merge(open_to_close_trend, left_index=True, right_index=True)
+    drivers_of_returns = drivers_of_returns.merge(
+        day_wise_summary_df.returns.to_frame(), left_index=True, right_index=True
+    )
+
+    # Rolling the minute vol and open to close trend
+    rolling_days = rolling_days
+    drivers_of_returns['minute_vol_rolling'] = drivers_of_returns['minute_vol'].rolling(rolling_days,
+                                                                                        min_periods=1).mean()
+    drivers_of_returns['open_to_close_trend_rolling'] = drivers_of_returns['open_to_close_trend'].rolling(
+        rolling_days, min_periods=1).mean()
+    drivers_of_returns['ratio'] = drivers_of_returns['open_to_close_trend'] / drivers_of_returns['minute_vol']
+    drivers_of_returns['rolling_ratio'] = drivers_of_returns['open_to_close_trend_rolling'] / drivers_of_returns[
+        'minute_vol_rolling']
+    drivers_of_returns['returns_rolling'] = (drivers_of_returns['returns'] / 100 + 1).cumprod()
+
+    return drivers_of_returns
+
+
+def nav_drawdown_analyser(df, column_to_convert='profit', base_price_col='close', nav_start=100, profit_in_pct=False):
+    """ Supply an analysed dataframe with a column that has the profit/loss in percentage or absolute value.
+    Params:
+    df: Dataframe with the column to be converted to NAV
+    column_to_convert: Column name to be converted to NAV (default: 'profit')
+    nav_start: Starting NAV (default: 100)
+    profit_in_pct: If the column is in percentage or absolute value (default: False)
+    """
+
+    df = df.copy(deep=True)
+    if column_to_convert in df.columns:
+        if profit_in_pct == False:
+            df['profit_pct'] = (df[column_to_convert] / df[base_price_col]) * 100
+        else:
+            df['profit_pct'] = df[column_to_convert]
+        df['strat_nav'] = ((df.profit_pct + 100) / 100).dropna().cumprod() * nav_start
+        df['cum_max'] = df.strat_nav.cummax()
+        df['drawdown'] = ((df.strat_nav / df.cum_max) - 1) * 100
+        df['rolling_cagr'] = df[:-1].apply(lambda row: ((df.strat_nav[-1] / row.strat_nav) ** (1 / (
+                (df.iloc[-1].name - row.name).days / 365)) - 1) * 100, axis=1)
+
+        # Drawdown ID below
+        df['drawdown_checker'] = np.where(df.drawdown != 0, 1, 0)
+        df['change_in_trend'] = df.drawdown_checker.ne(df.drawdown_checker.shift(1))
+        # df['streak_id'] = df.change_in_trend.cumsum()
+        df['start_of_drawdown'] = np.where((df.change_in_trend == True) &
+                                           (df.drawdown_checker == 1), True, False)
+        df['end_of_drawdown'] = np.where((df.change_in_trend == True) &
+                                         (df.drawdown_checker == 0), True, False)
+        df['drawdown_id'] = df.start_of_drawdown.cumsum()
+        df.drawdown_id = np.where(df.drawdown_checker == 1, df.drawdown_id, None)
+        return df.drop(['start_of_drawdown', 'end_of_drawdown', 'drawdown_checker', 'change_in_trend'], axis=1)
+    else:
+        print('No profit column found in df.')

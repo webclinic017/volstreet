@@ -22,7 +22,8 @@ import traceback
 
 global login_data, obj
 
-large_order_threshold = 10
+LARGE_ORDER_THRESHOLD = 10
+ERROR_NOTIFICATION_URL = None
 
 
 def log_errors(func):
@@ -32,6 +33,9 @@ def log_errors(func):
             return func(*args, **kwargs)
         except Exception as e:
             logger.error(f"Error in function {func.__name__}: {e}\nTraceback:{traceback.format_exc()}")
+            notifier(
+                f'Error in function {func.__name__}: {e}\nTraceback:{traceback.format_exc()}', ERROR_NOTIFICATION_URL
+            )
             raise e
     return wrapper
 
@@ -1124,7 +1128,7 @@ class Index:
     def splice_orders(self, quantity_in_lots):
         if quantity_in_lots > self.freeze_qty:
             loops = int(quantity_in_lots / self.freeze_qty)
-            if loops > large_order_threshold:
+            if loops > LARGE_ORDER_THRESHOLD:
                 raise Exception(
                     "Order too big. This error was raised to prevent accidental large order placement."
                 )
@@ -1356,7 +1360,8 @@ class Index:
                     f"All synthetic orders rejected for {buy_or_sell} {name} {strike} "
                     f"{expiry} {quantity_in_lots} lot(s)."
                 )
-            elif any(call_order_statuses == "pending") and any(
+                raise Exception("Synthetic future orders rejected")
+            elif any(call_order_statuses == "pending") or any(
                 put_order_statuses == "pending"
             ):
                 logger.info(
@@ -1372,6 +1377,11 @@ class Index:
                     f"ERROR. Synthetic order statuses uncertain for {buy_or_sell} {name} {strike} "
                     f"{expiry} {quantity_in_lots} lot(s)."
                 )
+                print(
+                    f"ERROR. Synthetic order statuses uncertain for {buy_or_sell} {name} {strike} "
+                    f"{expiry} {quantity_in_lots} lot(s)."
+                )
+                raise Exception("Synthetic future order statuses uncertain")
 
     def find_equal_strike(
         self, exit_time, websocket, wait_for_equality, target_disparity, expiry=None
@@ -3072,6 +3082,91 @@ class Index:
         position_monitor_thread.join()
         return shared_info_dict
 
+    @log_errors
+    def intraday_trend(
+            self,
+            quantity_in_lots,
+            start_time=(9, 15, 55),
+            exit_time=(15, 27),
+            sleep_time=20,
+    ):
+
+        while currenttime().time() < time(*start_time):
+            pass
+
+        open_price = self.fetch_ltp()
+        movement = 0
+        vix = get_current_vix()
+        beta = dm.get_summary_ratio(self.name, 'NIFTY')
+        beta = 1.3 if beta is None else beta
+        vix = vix * beta
+        threshold_movement = vix / 48
+        exit_time = time(*exit_time)
+        scan_end_time = datetime.combine(currenttime().date(), exit_time)
+        scan_end_time = scan_end_time - timedelta(minutes=10)
+        scan_end_time = scan_end_time.time()
+        upper_limit = open_price * (1 + threshold_movement / 100)
+        lower_limit = open_price * (1 - threshold_movement / 100)
+
+        notifier(
+            f"{self.name} trender starting with {threshold_movement:0.2f} threshold movement\n"
+            f"Current Price: {open_price}\nUpper limit: {upper_limit:0.2f}\n"
+            f"Lower limit: {lower_limit:0.2f}.",
+            self.webhook_url,
+        )
+        last_printed_time = currenttime()
+        while (
+                abs(movement) < threshold_movement and currenttime().time() < scan_end_time
+        ):
+            movement = ((self.fetch_ltp() / open_price) - 1) * 100
+            if currenttime() > last_printed_time + timedelta(minutes=1):
+                print(f"{self.name} trender: {movement:0.2f} movement.")
+                last_printed_time = currenttime()
+            sleep(sleep_time)
+
+        if currenttime().time() > scan_end_time:
+            notifier(f"{self.name} trender exiting due to time.", self.webhook_url)
+            return
+
+        price = self.fetch_ltp()
+        atm_strike = findstrike(price, self.base)
+        position = "BUY" if movement > 0 else "SELL"
+        self.place_synthetic_fut_order(
+            atm_strike,
+            self.current_expiry,
+            position,
+            quantity_in_lots,
+            prices="LIMIT",
+            check_status=True,
+        )
+        stop_loss_multiplier = 1.0032 if position == "SELL" else 0.9968
+        stop_loss_price = price * stop_loss_multiplier
+        stop_loss_hit = False
+        notifier(
+            f"{self.name} {position} trender triggered with {movement:0.2f} movement. {self.name} at {price}. "
+            f"Stop loss at {stop_loss_price}.",
+            self.webhook_url,
+        )
+        while currenttime().time() < exit_time and not stop_loss_hit:
+            if position == "BUY":
+                stop_loss_hit = self.fetch_ltp() < stop_loss_price
+            else:
+                stop_loss_hit = self.fetch_ltp() > stop_loss_price
+            sleep(sleep_time)
+        self.place_synthetic_fut_order(
+            atm_strike,
+            self.current_expiry,
+            "SELL" if position == "BUY" else "BUY",
+            quantity_in_lots,
+            prices="LIMIT",
+            check_status=True,
+        )
+        stop_loss_message = "Trender stop loss hit. " if stop_loss_hit else ""
+        notifier(
+            f"{stop_loss_message}{self.name} trender exited. {self.name} at {self.fetch_ltp()}.",
+            self.webhook_url,
+        )
+
     def intraday_straddle_delta_hedged(
         self,
         quantity_in_lots,
@@ -3442,19 +3537,21 @@ def lookup_and_return(book, field_to_lookup, value_to_lookup, field_to_return):
 
 # Discord messenger
 def notifier(message, webhook_url=None):
-    if webhook_url is None:
+    if webhook_url is None or webhook_url is False:
         print(message)
         return
     else:
         notification_url = webhook_url
         data = {"content": message}
-        requests.post(
-            notification_url,
-            data=json.dumps(data),
-            headers={"Content-Type": "application/json"},
-        )
-        print(message)
-    return
+        try:
+            requests.post(
+                notification_url,
+                data=json.dumps(data),
+                headers={"Content-Type": "application/json"},
+            )
+            print(message)
+        except requests.exceptions.SSLError as e:
+            print(f"Error in sending notification: {e}")
 
 
 def check_and_notify_order_statuses(statuses, webhook_url=None, target_status="complete", **kwargs):
@@ -3964,7 +4061,7 @@ def custom_round(x, base=0.05):
 def splice_orders(quantity_in_lots, freeze_qty):
     if quantity_in_lots > freeze_qty:
         loops = int(quantity_in_lots / freeze_qty)
-        if loops > large_order_threshold:
+        if loops > LARGE_ORDER_THRESHOLD:
             raise Exception(
                 "Order too big. This error was raised to prevent accidental large order placement."
             )
@@ -4105,7 +4202,7 @@ def get_current_vix():
 def get_index_constituents(index_symbol, cutoff_pct=101):
     # Fetch and filter constituents
     constituents = (
-        pd.read_csv(f"autotrader/info/{index_symbol}_constituents.csv")
+        pd.read_csv(f"data/{index_symbol}_constituents.csv")
         .sort_values("Index weight", ascending=False)
         .assign(cum_weight=lambda df: df["Index weight"].cumsum())
         .loc[lambda df: df.cum_weight < cutoff_pct]

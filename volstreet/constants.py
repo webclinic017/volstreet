@@ -38,7 +38,7 @@ def get_symbols():
         df["SYMBOL"] = df["SYMBOL"].str.strip()
     except Exception as e:
         print(f"Error in fetching qtyfreeze.xls: {e}")
-        df = pd.read_csv("autotrader/info/qtyfreeze.csv")
+        df = pd.read_csv("data/qtyfreeze.csv")
         df.columns = df.columns.str.strip()
         df["SYMBOL"] = df["SYMBOL"].str.strip()
     return df
