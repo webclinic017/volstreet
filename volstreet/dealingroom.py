@@ -2837,16 +2837,46 @@ class Index:
                 trend_option, "BUY", qty_in_lots, "LIMIT", "Intraday Strangle Trend Catcher", self.webhook_url
             )
 
-        def check_for_stop_loss(info_dict, side, sl_order_ids=None):
+        def _stop_loss_triggered(info, side, stop_loss_order_ids):
+            if stop_loss_order_ids is not None:
+                return  # Should return a boolean once implemented
 
-            if sl_order_ids is None:  # Not using SL orders
-                sl = info_dict[f"{side}_ltp_avg"] > info_dict[f"{side}_stop_loss_price"]
+            avg_price = info.get(f"{side}_ltp_avg")
+            stop_loss_price = info.get(f"{side}_stop_loss_price")
+            return avg_price > stop_loss_price
 
-            else:  # Using SL orders
-                sl = False
-                pass  # TODO: Implement fetching order status and checking for SL
+        def _underlying_moved(info, side):
+            current_price = info.get("underlying_ltp")
+            entry_price = info.get("spot_at_entry")
+            return current_price > entry_price if side == "call" else current_price < entry_price
 
-            info_dict[f"{side}_sl"] = sl
+        def _evaluate_iv_and_notify(info, side):
+            present_iv = info.get(f"{side}_iv") or info.get("avg_iv")
+            iv_at_entry = info.get(f"{side}_iv_at_entry") or info.get("avg_iv_at_entry")
+
+            if iv_at_entry is None or present_iv is None:
+                return
+
+            iv_change = present_iv / iv_at_entry
+            if not info.get("sl_check_notification_sent"):
+                message = f'{self.name} strangle {side} stop loss appears to be unjustified. ' \
+                          f'Underlying movement: {_underlying_moved(info, side)}, IV change: {iv_change}.'
+                notifier(message, self.webhook_url)
+                info["sl_check_notification_sent"] = True
+
+        def check_for_stop_loss(info, side, stop_loss_order_ids=None):
+            """Check for stop loss."""
+            stop_loss_triggered = _stop_loss_triggered(info, side, stop_loss_order_ids)
+            if stop_loss_triggered is None:
+                return  # TODO: Implement fetching order status and checking for stop loss
+            elif not stop_loss_triggered:
+                return
+
+            underlying_moved = _underlying_moved(info, side)
+            if underlying_moved:
+                info[f"{side}_sl"] = True
+            else:
+                _evaluate_iv_and_notify(info, side)
 
         def process_stop_loss(info_dict, sl_type):
 
@@ -2983,8 +3013,12 @@ class Index:
         # Setting up shared info dict
         shared_info_dict = {
             "traded_strangle": strangle,
+            "spot_at_entry": underlying_ltp,
             "call_avg_price": call_avg_price,
             "put_avg_price": put_avg_price,
+            "call_iv_at_entry": traded_call_iv,
+            "put_iv_at_entry": traded_put_iv,
+            "avg_iv_at_entry": traded_avg_iv,
             "call_stop_loss_price": call_stop_loss_price,
             "put_stop_loss_price": put_stop_loss_price,
             "call_stop_loss_order_ids": call_stop_loss_order_ids,
@@ -2992,9 +3026,13 @@ class Index:
             "call_ltp": call_ltp,
             "put_ltp": put_ltp,
             "underlying_ltp": underlying_ltp,
+            "call_iv": traded_call_iv,
+            "put_iv": traded_put_iv,
+            "avg_iv": traded_avg_iv,
             "call_sl": False,
             "put_sl": False,
-            "exit_triggers": {"trade_complete": False}
+            "exit_triggers": {"trade_complete": False},
+            "sl_check_notification_sent": False,
         }
 
         position_monitor_thread = Thread(target=position_monitor, args=(shared_info_dict,))
