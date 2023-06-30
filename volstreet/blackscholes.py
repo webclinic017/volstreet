@@ -258,10 +258,14 @@ def target_movement(
     estimated_movement_points = (target_price - current_price) / delta_
     estimated_movement = estimated_movement_points / current_spot
     timeleft = timeleft - (time_delta / 525600) if time_delta else timeleft
-    if timeleft < 0.0008:  # On expiry day
+
+    if timeleft < 0.0008:  # On expiry day we need to adjust the vol as iv increases steadily as we approach expiry
         vol_multiple = 2 - (1401.74 * timeleft)
         vol = vol * vol_multiple
-    modified_vol = iv_curve_adjustor(estimated_movement, timeleft, iv=vol, spot=current_spot, strike=strike)
+
+    modified_vol = iv_curve_adjustor(
+        estimated_movement, timeleft, iv=vol, spot=current_spot, strike=strike, _print_details=_print_details
+    )
 
     if _print_details:
         print(f'estimated movement: {estimated_movement}, vol: {vol}, modified vol: {modified_vol}')

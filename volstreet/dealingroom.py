@@ -23,12 +23,12 @@ import traceback
 global login_data, obj
 
 LARGE_ORDER_THRESHOLD = 10
-ERROR_NOTIFICATION_URL = {'url': None}
+ERROR_NOTIFICATION_SETTINGS = {'url': None}
 
 
-def set_error_notification_url(url):
-    global ERROR_NOTIFICATION_URL
-    ERROR_NOTIFICATION_URL['url'] = url
+def set_error_notification_settings(key, value):
+    global ERROR_NOTIFICATION_SETTINGS
+    ERROR_NOTIFICATION_SETTINGS[key] = value
 
 
 def log_errors(func):
@@ -37,10 +37,11 @@ def log_errors(func):
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            logger.error(f"Error in function {func.__name__}: {e}\nTraceback:{traceback.format_exc()}")
+            user_prefix = ERROR_NOTIFICATION_SETTINGS.get('user', '')
+            logger.error(f"{user_prefix}Error in function {func.__name__}: {e}\nTraceback:{traceback.format_exc()}")
             notifier(
-                f'Error in function {func.__name__}: {e}\nTraceback:{traceback.format_exc()}',
-                ERROR_NOTIFICATION_URL['url']
+                f"{user_prefix}Error in function {func.__name__}: {e}\nTraceback:{traceback.format_exc()}",
+                ERROR_NOTIFICATION_SETTINGS['url']
             )
             raise e
     return wrapper
@@ -1450,8 +1451,14 @@ class Index:
         disparities = compute_disparities(call_ltps, put_ltps)
 
         if wait_for_equality:
+
             last_print_time = currenttime()
-            print_interval = timedelta(seconds=0.0005)
+            last_log_time = currenttime()
+            last_notify_time = currenttime()
+            print_interval = timedelta(seconds=0.05)
+            log_interval = timedelta(minutes=1)
+            notify_interval = timedelta(minutes=2)
+
             min_disparity_idx = np.argmin(disparities)
             min_disparity = disparities[min_disparity_idx]
 
@@ -1481,16 +1488,22 @@ class Index:
 
                 min_disparity_idx = np.argmin(disparities)
                 min_disparity = disparities[min_disparity_idx]
-
-                if (currenttime() - last_print_time) > print_interval:
-                    print(
-                        f'Time: {currenttime().strftime("%H:%M:%S")}\n'
-                        + f"Index: {self.name}\n"
-                        + f"Current lowest disparity: {min_disparity:.2f}\n"
-                        + f"Strike: {strike_range[min_disparity_idx]}\n"
-                        + f"Single Strike: {single_check}\n"
-                    )
+                message = (
+                    f'Time: {currenttime().strftime("%H:%M:%S")}\n'
+                    + f"Index: {self.name}\n"
+                    + f"Current lowest disparity: {min_disparity:.2f}\n"
+                    + f"Strike: {strike_range[min_disparity_idx]}\n"
+                    + f"Single Strike: {single_check}\n"
+                )
+                if currenttime() - last_print_time > print_interval:
+                    print(message)
                     last_print_time = currenttime()
+                if currenttime() - last_log_time > log_interval:
+                    logger.info(message)
+                    last_log_time = currenttime()
+                if currenttime() - last_notify_time > notify_interval:
+                    notifier(message, self.webhook_url)
+                    last_notify_time = currenttime()
 
                 if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
                     notifier(
@@ -1708,6 +1721,7 @@ class Index:
         trade_data[self.name] = sell_strike
         save_data(trade_data)
 
+    @log_errors
     def buy_weekly_hedge(
         self,
         quantity_in_lots,
@@ -2845,38 +2859,46 @@ class Index:
             stop_loss_price = info.get(f"{side}_stop_loss_price")
             return avg_price > stop_loss_price
 
-        def _underlying_moved(info, side):
-            current_price = info.get("underlying_ltp")
-            entry_price = info.get("spot_at_entry")
-            return current_price > entry_price if side == "call" else current_price < entry_price
+        def justify_stop_loss(info, side):
 
-        def _evaluate_iv_and_notify(info, side):
-            present_iv = info.get(f"{side}_iv") or info.get("avg_iv")
-            iv_at_entry = info.get(f"{side}_iv_at_entry") or info.get("avg_iv_at_entry")
+            entry_spot = info.get("spot_at_entry")
+            current_spot = info.get("underlying_ltp")
 
-            if iv_at_entry is None or present_iv is None:
+            # If the spot has moved in the direction of stop loss
+            time_left_day_start = info.get("time_left_day_start")
+            time_left_now = timetoexpiry(expiry)
+            time_delta = (time_left_day_start - time_left_now)*525600
+            time_delta = int(time_delta)
+            estimated_movement = bs.target_movement(
+                side,
+                info.get(f"{side}_avg_price"),
+                info.get(f"{side}_stop_loss_price"),
+                entry_spot,
+                info.get("traded_strangle").call_strike if side == "call" else info.get("traded_strangle").put_strike,
+                time_left_day_start,
+                time_delta
+            )
+            actual_movement = (current_spot - entry_spot) / entry_spot
+            difference_in_sign = np.sign(estimated_movement) != np.sign(actual_movement)
+            lack_of_movement = abs(actual_movement) < 0.8*abs(estimated_movement)
+            # 0.8 above is a magic number TODO: Remove magic number and find a better way to check for lack of movement
+            if difference_in_sign or lack_of_movement:
+                if not info.get("sl_check_notification_sent"):
+                    message = f'{self.name} strangle {side} stop loss appears to be unjustified. ' \
+                              f'Estimated movement: {estimated_movement}, Actual movement: {actual_movement}'
+                    notifier(message, self.webhook_url)
+                    info["sl_check_notification_sent"] = True
                 return
-
-            iv_change = present_iv / iv_at_entry
-            if not info.get("sl_check_notification_sent"):
-                message = f'{self.name} strangle {side} stop loss appears to be unjustified. ' \
-                          f'Underlying movement: {_underlying_moved(info, side)}, IV change: {iv_change}.'
-                notifier(message, self.webhook_url)
-                info["sl_check_notification_sent"] = True
+            else:
+                info[f"{side}_sl"] = True
 
         def check_for_stop_loss(info, side, stop_loss_order_ids=None):
             """Check for stop loss."""
             stop_loss_triggered = _stop_loss_triggered(info, side, stop_loss_order_ids)
             if stop_loss_triggered is None:
                 return  # TODO: Implement fetching order status and checking for stop loss
-            elif not stop_loss_triggered:
-                return
-
-            underlying_moved = _underlying_moved(info, side)
-            if underlying_moved:
-                info[f"{side}_sl"] = True
-            else:
-                _evaluate_iv_and_notify(info, side)
+            if stop_loss_triggered:
+                justify_stop_loss(info, side)
 
         def process_stop_loss(info_dict, sl_type):
 
@@ -2979,6 +3001,7 @@ class Index:
             timeleft=timetoexpiry(expiry)
         )
 
+        time_left_at_trade = timetoexpiry(expiry)
         summary_message += f"\nTraded IVs: {traded_call_iv}, {traded_put_iv}, {traded_avg_iv}"
         summary_message += f"\nCall SL: {call_stop_loss_price}, Put SL: {put_stop_loss_price}"
         notifier(summary_message, self.webhook_url)
@@ -3023,6 +3046,7 @@ class Index:
             "put_stop_loss_price": put_stop_loss_price,
             "call_stop_loss_order_ids": call_stop_loss_order_ids,
             "put_stop_loss_order_ids": put_stop_loss_order_ids,
+            "time_left_day_start": time_left_at_trade,
             "call_ltp": call_ltp,
             "put_ltp": put_ltp,
             "underlying_ltp": underlying_ltp,
@@ -3488,6 +3512,7 @@ def login(user, pin, apikey, authkey, webhook_url=None):
 
         logger.info("Logged in successfully.")
 
+        set_error_notification_settings("user", f"{obj.userId} - ")
         notifier(
             f'Date: {currenttime().strftime("%d %b %Y %H:%M:%S")}\nLogged in successfully.',
             webhook_url,

@@ -104,7 +104,7 @@ def intraday_options_on_indices(
 
     # Wait for the market to open
     while vs.currenttime().time() < time(*start_time):
-        pass
+        sleep(1)
 
     # Start the data updater thread
     if shared_data and update_data_thread is not None:
@@ -173,111 +173,6 @@ def overnight_straddle_nifty(
         vs.append_data_to_json(nifty.order_log, f"{user}_NIFTY_ON_straddle_log.json")
     except Exception as e:
         vs.notifier(f"Appending data failed: {e}", discord_webhook_url)
-
-
-@vs.log_errors
-def intraday_trend_on_nifty(
-    quantity_in_lots,
-    client=None,
-    user=None,
-    pin=None,
-    apikey=None,
-    authkey=None,
-    webhook_url=None,
-    start_time=(9, 15, 55),
-    exit_time=(15, 27),
-    sleep_time=20,
-):
-    user, pin, apikey, authkey, discord_webhook_url = get_user_data(
-        client, user, pin, apikey, authkey, webhook_url
-    )
-
-    if vs.currenttime().date() in vs.holidays:
-        vs.notifier("Today is a holiday. Exiting.", discord_webhook_url)
-        exit()
-
-    vs.login(
-        user=user,
-        pin=pin,
-        apikey=apikey,
-        authkey=authkey,
-        webhook_url=discord_webhook_url,
-    )
-
-    nifty = vs.Index("NIFTY", webhook_url=discord_webhook_url)
-
-    while vs.currenttime().time() < time(*start_time):
-        pass
-
-    nifty_open_price = nifty.fetch_ltp()
-    movement = 0
-    vix = vs.get_current_vix()
-    threshold_movement = vix / 48
-    exit_time = time(*exit_time)
-    scan_end_time = vs.datetime.combine(vs.currenttime().date(), exit_time)
-    scan_end_time = scan_end_time - vs.timedelta(minutes=10)
-    scan_end_time = scan_end_time.time()
-    upper_limit = nifty_open_price * (1 + threshold_movement / 100)
-    lower_limit = nifty_open_price * (1 - threshold_movement / 100)
-
-    vs.notifier(
-        f"Nifty trender starting with {threshold_movement:0.2f} threshold movement\n"
-        f"Current Price: {nifty_open_price}\nUpper limit: {upper_limit:0.2f}\n"
-        f"Lower limit: {lower_limit:0.2f}.",
-        discord_webhook_url,
-    )
-    last_printed_time = vs.currenttime()
-    while (
-        abs(movement) < threshold_movement and vs.currenttime().time() < scan_end_time
-    ):
-        movement = ((nifty.fetch_ltp() / nifty_open_price) - 1) * 100
-        if vs.currenttime() > last_printed_time + vs.timedelta(minutes=1):
-            print(f"Nifty trender: {movement:0.2f} movement.")
-            last_printed_time = vs.currenttime()
-        sleep(sleep_time)
-
-    if vs.currenttime().time() > scan_end_time:
-        vs.notifier("Nifty trender exiting due to time.", discord_webhook_url)
-        return
-
-    price = nifty.fetch_ltp()
-    atm_strike = vs.findstrike(price, nifty.base)
-    position = "BUY" if movement > 0 else "SELL"
-    nifty.place_synthetic_fut_order(
-        atm_strike,
-        nifty.current_expiry,
-        position,
-        quantity_in_lots,
-        prices="LIMIT",
-        check_status=True,
-    )
-    stop_loss_multiplier = 1.0032 if position == "SELL" else 0.9968
-    stop_loss_price = price * stop_loss_multiplier
-    stop_loss_hit = False
-    vs.notifier(
-        f"Nifty {position} trender triggered with {movement:0.2f} movement. Nifty at {price}. "
-        f"Stop loss at {stop_loss_price}.",
-        discord_webhook_url,
-    )
-    while vs.currenttime().time() < exit_time and not stop_loss_hit:
-        if position == "BUY":
-            stop_loss_hit = nifty.fetch_ltp() < stop_loss_price
-        else:
-            stop_loss_hit = nifty.fetch_ltp() > stop_loss_price
-        sleep(sleep_time)
-    nifty.place_synthetic_fut_order(
-        atm_strike,
-        nifty.current_expiry,
-        "SELL" if position == "BUY" else "BUY",
-        quantity_in_lots,
-        prices="LIMIT",
-        check_status=True,
-    )
-    stop_loss_message = "Trender stop loss hit. " if stop_loss_hit else ""
-    vs.notifier(
-        f"{stop_loss_message}Nifty trender exited. Nifty at {nifty.fetch_ltp()}.",
-        discord_webhook_url,
-    )
 
 
 def intraday_trend_on_indices(
