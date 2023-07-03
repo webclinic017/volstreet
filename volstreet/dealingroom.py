@@ -571,17 +571,22 @@ class Strangle:
     def fetch_symbol_token(self):
         return self.call_symbol, self.call_token, self.put_symbol, self.put_token
 
-    def place_order(self, transaction_type, quantity_in_lots, prices="LIMIT", order_tag=""):
-        if isinstance(prices, (tuple, list, np.ndarray)):
+    def place_order(self, transaction_type, quantity_in_lots, prices="LIMIT", stop_loss_order=False, order_tag=""):
+
+        if stop_loss_order:
+            assert isinstance(prices, (tuple, list, np.ndarray)), "Prices must be a tuple of prices for stop loss order"
             call_price, put_price = prices
-        elif prices.upper() == "LIMIT":
-            call_price, put_price = self.fetch_ltp()
-            modifier = 1.05 if transaction_type.upper() == "BUY" else 0.95
-            call_price, put_price = call_price * modifier, put_price * modifier
-        elif prices.upper() == "MARKET":
-            call_price = put_price = prices
         else:
-            raise ValueError("Prices must be either 'LIMIT' or 'MARKET' or a tuple of prices")
+            if isinstance(prices, (tuple, list, np.ndarray)):
+                call_price, put_price = prices
+            elif prices.upper() == "LIMIT":
+                call_price, put_price = self.fetch_ltp()
+                modifier = 1.05 if transaction_type.upper() == "BUY" else 0.95
+                call_price, put_price = call_price * modifier, put_price * modifier
+            elif prices.upper() == "MARKET":
+                call_price = put_price = prices
+            else:
+                raise ValueError("Prices must be either 'LIMIT' or 'MARKET' or a tuple of prices")
 
         spliced_orders = splice_orders(quantity_in_lots, self.freeze_qty_in_lots)
         call_order_ids = []
@@ -593,10 +598,17 @@ class Strangle:
                 qty * self.lot_size,
                 transaction_type,
                 call_price,
+                stop_loss_order=stop_loss_order,
                 order_tag=order_tag
             )
             put_order_id = place_order(
-                self.put_symbol, self.put_token, qty * self.lot_size, transaction_type, put_price, order_tag=order_tag
+                self.put_symbol,
+                self.put_token,
+                qty * self.lot_size,
+                transaction_type,
+                put_price,
+                stop_loss_order=stop_loss_order,
+                order_tag=order_tag
             )
             call_order_ids.append(call_order_id)
             put_order_ids.append(put_order_id)
@@ -612,7 +624,9 @@ class SyntheticFuture(Strangle):
     def __init__(self, strike, underlying, expiry):
         super().__init__(strike, strike, underlying, expiry)
 
-    def place_order(self, transaction_type, quantity_in_lots, prices="LIMIT", order_tag=""):
+    def place_order(
+            self, transaction_type, quantity_in_lots, prices: str | tuple = "LIMIT", stop_loss_order=False, order_tag=""
+    ):
         if isinstance(prices, (tuple, list, np.ndarray)):
             call_price, put_price = prices
         elif prices.upper() == "LIMIT":
@@ -691,10 +705,9 @@ class SyntheticArbSystem:
         self,
         index: str,
         expiry: str,
-        qty: int,
+        qty_in_lots: int,
         exit_time=(15, 28),
         threshold=3,
-        at_market=False,
     ):
         (
             strikes,
@@ -734,28 +747,17 @@ class SyntheticArbSystem:
                     f"and Max {strikes[max_price_index]}**********\n"
                     f"Minimum price: {min_price} at strike: {strikes[min_price_index]} Call Ask: {call_asks[min_price_index]} Put Bid: {put_bids[min_price_index]}\n"
                     f"Maximum price: {max_price} at strike: {strikes[max_price_index]} Call Bid: {call_bids[max_price_index]} Put Ask: {put_asks[max_price_index]}\n"
-                    f"Price difference: {max_price - min_price}\nExpected Profit: {(max_price - min_price) * qty}\n"
+                    f"Price difference: {max_price - min_price}\n"
                 )
                 min_strike = strikes[min_price_index]
                 max_strike = strikes[max_price_index]
-                min_strike_call_ask = call_asks[min_price_index]
-                min_strike_put_bid = put_bids[min_price_index]
-                max_strike_call_bid = call_bids[max_price_index]
-                max_strike_put_ask = put_asks[max_price_index]
-                if at_market:
-                    buy_prices = "MARKET"
-                    sell_prices = "MARKET"
-                else:
-                    buy_prices = (min_strike_call_ask, min_strike_put_bid)
-                    sell_prices = (max_strike_call_bid, max_strike_put_ask)
+
                 self.execute_synthetic_trade(
                     index,
                     expiry,
-                    qty,
+                    qty_in_lots,
                     min_strike,
-                    buy_prices,
                     max_strike,
-                    sell_prices,
                     sleep_interval=5,
                 )
 
@@ -797,74 +799,29 @@ class SyntheticArbSystem:
             min_price = synthetic_buy_prices[min_price_index]
             max_price = synthetic_sell_prices[max_price_index]
 
+    @staticmethod
     def execute_synthetic_trade(
-        self,
         index,
         expiry,
-        qty,
+        qty_in_lots,
         buy_strike,
-        buy_strike_prices,
         sell_strike,
-        sell_strike_prices,
         sleep_interval=1,
     ):
-        id_call_buy, id_put_sell = place_synthetic_fut_order(
-            index, buy_strike, expiry, "BUY", qty, buy_strike_prices
+        ids_call_buy, ids_put_sell = place_synthetic_fut_order(
+            index, buy_strike, expiry, "BUY", qty_in_lots, 'MARKET'
         )
-        id_call_sell, id_put_buy = place_synthetic_fut_order(
-            index, sell_strike, expiry, "SELL", qty, sell_strike_prices
+        ids_call_sell, ids_put_buy = place_synthetic_fut_order(
+            index, sell_strike, expiry, "SELL", qty_in_lots, 'MARKET'
         )
-        ids = [id_call_buy, id_put_sell, id_call_sell, id_put_buy]
-        call_buy_token, call_buy_symbol = fetch_symbol_token(
-            index, expiry, buy_strike, "CE"
-        )
-        put_sell_token, put_sell_symbol = fetch_symbol_token(
-            index, expiry, buy_strike, "PE"
-        )
-        call_sell_token, call_sell_symbol = fetch_symbol_token(
-            index, expiry, sell_strike, "CE"
-        )
-        put_buy_token, put_buy_symbol = fetch_symbol_token(
-            index, expiry, sell_strike, "PE"
-        )
+        ids = np.concatenate((ids_call_buy, ids_put_sell, ids_call_sell, ids_put_buy))
+
         sleep(sleep_interval)
         statuses = lookup_and_return("orderbook", "orderid", ids, "status")
-        if any(statuses == "open"):
-            # Finding the open order ids using statues and ids and cancelling them in the fastest way possible
-            open_order_ids = [
-                ids[i] for i, status in enumerate(statuses) if status == "open"
-            ]
-            cancel_pending_orders(open_order_ids)
 
-            # Reversing the trade which got executed
-            for i, status in enumerate(statuses):
-                if status == "complete":
-                    if i == 0:
-                        place_order(
-                            call_buy_symbol, call_buy_token, qty, "SELL", "MARKET"
-                        )
-                    elif i == 1:
-                        place_order(
-                            put_sell_symbol, put_sell_token, qty, "BUY", "MARKET"
-                        )
-                    elif i == 2:
-                        place_order(
-                            call_sell_symbol, call_sell_token, qty, "BUY", "MARKET"
-                        )
-                    elif i == 3:
-                        place_order(put_buy_symbol, put_buy_token, qty, "SELL", "MARKET")
-            logger.info(
-                f"Order cancelled and reversed for {index} {expiry} {qty} Buy {buy_strike} Sell {sell_strike}"
-            )
-            self.unsuccessful_trades += 1
-        elif all(statuses == "complete"):
-            self.successful_trades += 1
-            logger.info(
-                f"Order executed for {index} {expiry} {qty} Buy {buy_strike} Sell {sell_strike}"
-            )
-        elif any(statuses == "rejected"):
+        if any(statuses == "rejected"):
             logger.error(
-                f"Order rejected for {index} {expiry} {qty} Buy {buy_strike} Sell {sell_strike}"
+                f"Order rejected for {index} {expiry} {qty_in_lots} Buy {buy_strike} Sell {sell_strike}"
             )
 
 
@@ -1286,109 +1243,12 @@ class Index:
             )
             raise Exception("Order statuses uncertain")
 
-    def place_synthetic_fut_order(
-        self,
-        strike,
-        expiry,
-        buy_or_sell,
-        quantity_in_lots,
-        prices="LIMIT",
-        check_status=True,
+    def place_synthetic_fut(
+            self, strike, expiry, buy_or_sell, quantity_in_lots, prices="LIMIT", stop_loss_order=False, order_tag=""
     ):
-        """Places a synthetic future order. Quantity is in number of shares."""
-        name = self.name
-        strike = int(strike)
-        expiry = expiry
-        buy_or_sell = buy_or_sell
-        spliced_orders = self.splice_orders(quantity_in_lots)
-        straddle = Straddle(strike, name, expiry)
-        call_symbol, call_token, put_symbol, put_token = straddle.fetch_symbol_token()
-        if prices == "LIMIT":
-            call_price, put_price = straddle.fetch_ltp()
-            if buy_or_sell == "BUY":
-                call_price = call_price * 1.05
-                put_price = put_price * 0.95
-            else:
-                call_price = call_price * 0.95
-                put_price = put_price * 1.05
-        elif prices == "MARKET":
-            call_price = "MARKET"
-            put_price = "MARKET"
-        else:
-            call_price, put_price = prices
-
-        call_action = "BUY" if buy_or_sell == "BUY" else "SELL"
-        put_action = "SELL" if buy_or_sell == "BUY" else "BUY"
-
-        order_ids_call = []
-        order_ids_put = []
-        for quantity in spliced_orders:
-            quantity_in_shares = quantity * self.lot_size
-
-            order_id_call = place_order(
-                call_symbol, call_token, quantity_in_shares, call_action, call_price
-            )
-            order_id_put = place_order(
-                put_symbol, put_token, quantity_in_shares, put_action, put_price
-            )
-            if check_status:
-                order_ids_call.append(order_id_call)
-                order_ids_put.append(order_id_put)
-
-        if check_status:
-            orderbook = fetch_book("orderbook")
-
-            call_order_statuses = lookup_and_return(
-                orderbook, "orderid", order_ids_call, "status"
-            )
-            put_order_statuses = lookup_and_return(
-                orderbook, "orderid", order_ids_put, "status"
-            )
-
-            if all(call_order_statuses == "complete") and all(
-                put_order_statuses == "complete"
-            ):
-                logger.info(
-                    f"Synthetic Order(s) placed successfully for {buy_or_sell} {name} {strike} {expiry} "
-                    f"{quantity_in_lots} lot(s)."
-                )
-                print(
-                    f"Synthetic Order(s) placed successfully for {buy_or_sell} {name} {strike} {expiry} "
-                    f"{quantity_in_lots} lot(s)."
-                )
-            elif all(call_order_statuses == "rejected") and all(
-                put_order_statuses == "rejected"
-            ):
-                logger.info(
-                    f"All synthetic orders rejected for {buy_or_sell} {name} {strike} "
-                    f"{expiry} {quantity_in_lots} lot(s)."
-                )
-                print(
-                    f"All synthetic orders rejected for {buy_or_sell} {name} {strike} "
-                    f"{expiry} {quantity_in_lots} lot(s)."
-                )
-                raise Exception("Synthetic future orders rejected")
-            elif any(call_order_statuses == "pending") or any(
-                put_order_statuses == "pending"
-            ):
-                logger.info(
-                    f"Some synthetic orders pending for {buy_or_sell} {name} {strike} "
-                    f"{expiry} {quantity_in_lots} lot(s)."
-                )
-                print(
-                    f"Some synthetic orders pending for {buy_or_sell} {name} {strike} "
-                    f"{expiry} {quantity_in_lots} lot(s)."
-                )
-            else:
-                logger.error(
-                    f"ERROR. Synthetic order statuses uncertain for {buy_or_sell} {name} {strike} "
-                    f"{expiry} {quantity_in_lots} lot(s)."
-                )
-                print(
-                    f"ERROR. Synthetic order statuses uncertain for {buy_or_sell} {name} {strike} "
-                    f"{expiry} {quantity_in_lots} lot(s)."
-                )
-                raise Exception("Synthetic future order statuses uncertain")
+        return place_synthetic_fut_order(
+            self.name, strike, expiry, buy_or_sell, quantity_in_lots, prices, stop_loss_order, order_tag
+        )
 
     def find_equal_strike(
         self, exit_time, websocket, wait_for_equality, target_disparity, expiry=None
@@ -2880,16 +2740,19 @@ class Index:
             )
             actual_movement = (current_spot - entry_spot) / entry_spot
             difference_in_sign = np.sign(estimated_movement) != np.sign(actual_movement)
-            lack_of_movement = abs(actual_movement) < 0.8*abs(estimated_movement)
+            lack_of_movement = abs(actual_movement) < 0.8 * abs(estimated_movement)
             # 0.8 above is a magic number TODO: Remove magic number and find a better way to check for lack of movement
             if difference_in_sign or lack_of_movement:
-                if not info.get("sl_check_notification_sent"):
+                if not info.get(f"{side}_sl_check_notification_sent"):
                     message = f'{self.name} strangle {side} stop loss appears to be unjustified. ' \
                               f'Estimated movement: {estimated_movement}, Actual movement: {actual_movement}'
                     notifier(message, self.webhook_url)
-                    info["sl_check_notification_sent"] = True
+                    info[f"{side}_sl_check_notification_sent"] = True
                 return
             else:
+                message = f"{self.name} strangle {side} stop loss triggered. " \
+                          f"Estimated movement: {estimated_movement}, Actual movement: {actual_movement}"
+                notifier(message, self.webhook_url)
                 info[f"{side}_sl"] = True
 
         def check_for_stop_loss(info, side, stop_loss_order_ids=None):
@@ -2907,7 +2770,6 @@ class Index:
 
             traded_strangle = info_dict["traded_strangle"]
             # Buying the stop loss option back
-            notifier(f'{self.name} strangle {sl_type} stop loss hit.', self.webhook_url)
             option_to_buy = traded_strangle.call_option if sl_type == "call" else traded_strangle.put_option
             exit_price = place_option_order_and_notify(
                 option_to_buy, "BUY", quantity_in_lots, "LIMIT", order_tag, self.webhook_url
@@ -3008,10 +2870,10 @@ class Index:
 
         if place_sl_orders:
             call_stop_loss_order_ids = place_option_order_and_notify(
-                option=strangle.call_option,
+                instrument=strangle.call_option,
                 action="BUY",
                 qty_in_lots=quantity_in_lots,
-                price=call_stop_loss_price,
+                prices=call_stop_loss_price,
                 order_tag="Call SL Strangle",
                 webhook_url=self.webhook_url,
                 stop_loss_order=True,
@@ -3019,10 +2881,10 @@ class Index:
                 return_avg_price=False
             )
             put_stop_loss_order_ids = place_option_order_and_notify(
-                option=strangle.put_option,
+                instrument=strangle.put_option,
                 action="BUY",
                 qty_in_lots=quantity_in_lots,
-                price=put_stop_loss_price,
+                prices=put_stop_loss_price,
                 order_tag="Put SL Strangle",
                 webhook_url=self.webhook_url,
                 stop_loss_order=True,
@@ -3056,7 +2918,8 @@ class Index:
             "call_sl": False,
             "put_sl": False,
             "exit_triggers": {"trade_complete": False},
-            "sl_check_notification_sent": False,
+            "call_sl_check_notification_sent": False,
+            "put_sl_check_notification_sent": False,
         }
 
         position_monitor_thread = Thread(target=position_monitor, args=(shared_info_dict,))
@@ -3081,7 +2944,7 @@ class Index:
         put_sl = shared_info_dict["put_sl"]
 
         if not call_sl and not put_sl:
-            call_order_ids, put_order_ids = strangle.place_order("BUY", quantity_in_lots, "LIMIT", order_tag)
+            call_order_ids, put_order_ids = strangle.place_order("BUY", quantity_in_lots, "LIMIT", order_tag=order_tag)
             order_book = fetch_book('orderbook')
             order_statuses_ = lookup_and_return(order_book, 'orderid', call_order_ids + put_order_ids, 'status')
             check_and_notify_order_statuses(
@@ -3157,18 +3020,23 @@ class Index:
             start_time=(9, 15, 55),
             exit_time=(15, 27),
             sleep_time=20,
+            threshold_movement=None,
     ):
 
         while currenttime().time() < time(*start_time):
-            pass
+            print(f"{self.name} trender sleeping till {start_time}")
+            sleep(1)
 
         open_price = self.fetch_ltp()
         movement = 0
-        vix = get_current_vix()
-        beta = dm.get_summary_ratio(self.name, 'NIFTY')
-        beta = 1.3 if beta is None else beta
-        vix = vix * beta
-        threshold_movement = vix / 48
+
+        if threshold_movement is None:
+            vix = get_current_vix()
+            beta = dm.get_summary_ratio(self.name, 'NIFTY')
+            beta = 1.3 if beta is None else beta
+            vix = vix * beta
+            threshold_movement = vix / 48
+
         exit_time = time(*exit_time)
         scan_end_time = datetime.combine(currenttime().date(), exit_time)
         scan_end_time = scan_end_time - timedelta(minutes=10)
@@ -3182,14 +3050,14 @@ class Index:
             f"Lower limit: {lower_limit:0.2f}.",
             self.webhook_url,
         )
-        last_printed_time = currenttime()
+        last_print_time = currenttime()
         while (
                 abs(movement) < threshold_movement and currenttime().time() < scan_end_time
         ):
             movement = ((self.fetch_ltp() / open_price) - 1) * 100
-            if currenttime() > last_printed_time + timedelta(minutes=1):
+            if currenttime() > last_print_time + timedelta(minutes=1):
                 print(f"{self.name} trender: {movement:0.2f} movement.")
-                last_printed_time = currenttime()
+                last_print_time = currenttime()
             sleep(sleep_time)
 
         if currenttime().time() > scan_end_time:
@@ -3199,14 +3067,7 @@ class Index:
         price = self.fetch_ltp()
         atm_strike = findstrike(price, self.base)
         position = "BUY" if movement > 0 else "SELL"
-        self.place_synthetic_fut_order(
-            atm_strike,
-            self.current_expiry,
-            position,
-            quantity_in_lots,
-            prices="LIMIT",
-            check_status=True,
-        )
+        atm_synthetic_fut = SyntheticFuture(atm_strike, self.name, self.current_expiry)
         stop_loss_multiplier = 1.0032 if position == "SELL" else 0.9968
         stop_loss_price = price * stop_loss_multiplier
         stop_loss_hit = False
@@ -3215,23 +3076,27 @@ class Index:
             f"Stop loss at {stop_loss_price}.",
             self.webhook_url,
         )
+        place_option_order_and_notify(
+            atm_synthetic_fut, position, quantity_in_lots, "LIMIT", f"{self.name} trender", self.webhook_url
+        )
+
         while currenttime().time() < exit_time and not stop_loss_hit:
             if position == "BUY":
                 stop_loss_hit = self.fetch_ltp() < stop_loss_price
             else:
                 stop_loss_hit = self.fetch_ltp() > stop_loss_price
             sleep(sleep_time)
-        self.place_synthetic_fut_order(
-            atm_strike,
-            self.current_expiry,
-            "SELL" if position == "BUY" else "BUY",
-            quantity_in_lots,
-            prices="LIMIT",
-            check_status=True,
-        )
         stop_loss_message = "Trender stop loss hit. " if stop_loss_hit else ""
         notifier(
-            f"{stop_loss_message}{self.name} trender exited. {self.name} at {self.fetch_ltp()}.",
+            f"{stop_loss_message}{self.name} trender exiting. {self.name} at {self.fetch_ltp()}.",
+            self.webhook_url,
+        )
+        place_option_order_and_notify(
+            atm_synthetic_fut,
+            "BUY" if position == "SELL" else "SELL",
+            quantity_in_lots,
+            "LIMIT",
+            f"{self.name} trender",
             self.webhook_url,
         )
 
@@ -3336,7 +3201,7 @@ class Index:
                         equal_strike,
                         expiry,
                         "SELL",
-                        lots_to_sell * self.lot_size,
+                        lots_to_sell,
                     )
                     positions[synthetic_fut_call]["delta_quantity"] -= (
                         lots_to_sell * self.lot_size
@@ -3357,7 +3222,7 @@ class Index:
                         equal_strike,
                         expiry,
                         "BUY",
-                        lots_to_buy * self.lot_size,
+                        lots_to_buy,
                     )
                     positions[synthetic_fut_call]["delta_quantity"] += (
                         lots_to_buy * self.lot_size
@@ -3385,14 +3250,15 @@ class Index:
         if call_delta_quantity != 0 and put_delta_quantity != 0:
             assert call_delta_quantity == -1 * put_delta_quantity
             quantity_to_square_up = abs(call_delta_quantity)
+            quantity_to_square_up_in_lots = quantity_to_square_up / self.lot_size
 
             if call_delta_quantity > 0:
                 action = "SELL"
             else:
                 action = "BUY"
 
-            self.place_synthetic_fut_order(
-                equal_strike, expiry, action, quantity_to_square_up
+            self.place_synthetic_fut(
+                equal_strike, expiry, action, quantity_to_square_up_in_lots
             )
             notifier(
                 f"Intraday Straddle with delta: Squared off delta positions. "
@@ -3583,8 +3449,8 @@ def lookup_and_return(book, field_to_lookup, value_to_lookup, field_to_return):
             return np.array(bucket)
 
     if not (
-        isinstance(field_to_lookup, (str, list))
-        and isinstance(value_to_lookup, (str, list))
+        isinstance(field_to_lookup, (str, list, tuple, np.ndarray))
+        and isinstance(value_to_lookup, (str, list, tuple, np.ndarray))
     ):
         raise ValueError(
             "Both 'field_to_lookup' and 'value_to_lookup' must be strings or lists."
@@ -3625,7 +3491,7 @@ def notifier(message, webhook_url=None):
 
 def check_and_notify_order_statuses(statuses, webhook_url=None, target_status="complete", **kwargs):
 
-    order_prefix = f"{kwargs['order_tag']}: " if "order_tag" in kwargs else ""
+    order_prefix = f"{kwargs['order_tag']}: " if "order_tag" in kwargs and kwargs["order_tag"] != "" else ""
     order_message = [f"{k}-{v}" for k, v in kwargs.items() if k != "order_tag"]
     order_message = ", ".join(order_message)
 
@@ -3659,41 +3525,63 @@ def check_and_notify_order_statuses(statuses, webhook_url=None, target_status="c
 
 
 def place_option_order_and_notify(
-        option: Option,
-        action: str,
-        qty_in_lots,
-        price="LIMIT",
-        order_tag="",
-        webhook_url=None,
-        stop_loss_order=False,
-        target_status="complete",
-        return_avg_price=True
+    instrument: Option | Strangle | Straddle | SyntheticFuture,
+    action: str,
+    qty_in_lots: int,
+    prices: str | int | float | tuple | list | np.ndarray = "LIMIT",
+    order_tag: str = "",
+    webhook_url=None,
+    stop_loss_order: bool = False,
+    target_status: str = "complete",
+    return_avg_price: bool = True
 ):
 
-    if stop_loss_order:
-        assert isinstance(price, (int, float)), "Stop loss order requires a price"
+    notify_dict = {
+        "target_status": target_status,
+        "order_tag": order_tag,
+        "Underlying": instrument.underlying,
+        "Action": action,
+        "Expiry": instrument.expiry,
+        "Qty": qty_in_lots
+    }
 
-    order_ids = option.place_order(
-        transaction_type=action,
-        quantity_in_lots=qty_in_lots,
-        price=price,
-        stop_loss_order=stop_loss_order,
-        order_tag=order_tag
-    )
+    order_params = {
+        "transaction_type": action,
+        "quantity_in_lots": qty_in_lots,
+        "stop_loss_order": stop_loss_order,
+        "order_tag": order_tag
+    }
+
+    if isinstance(instrument, (Strangle, Straddle, SyntheticFuture)):
+        notify_dict.update({
+            "Strikes": [instrument.call_strike, instrument.put_strike]})
+        order_params.update({
+            "prices": prices
+        })
+    elif isinstance(instrument, Option):
+        notify_dict.update({
+            "Strike": instrument.strike,
+            "OptionType": instrument.option_type
+        })
+        order_params.update({
+            "price": prices
+        })
+    else:
+        raise ValueError("Invalid instrument type")
+
+    if stop_loss_order:
+        assert isinstance(prices, (int, float, tuple, list, np.ndarray)), "Stop loss order requires a price"
+
+    # Placing the order
+    order_ids = instrument.place_order(**order_params)
+
+    if isinstance(order_ids, tuple):
+        # Merge the order IDs into a single list
+        order_ids = list(itertools.chain(*order_ids))
+
     order_book = fetch_book('orderbook')
     order_statuses_ = lookup_and_return(order_book, 'orderid', order_ids, 'status')
-    check_and_notify_order_statuses(
-        order_statuses_,
-        webhook_url,
-        target_status=target_status,
-        order_tag=order_tag,
-        Underlying=option.underlying,
-        Action=action,
-        Strike=option.strike,
-        OptionType=option.option_type,
-        Expiry=option.expiry,
-        Qty=qty_in_lots
-    )
+    check_and_notify_order_statuses(order_statuses_, webhook_url, **notify_dict)
 
     if return_avg_price:
         avg_price = lookup_and_return(order_book, 'orderid', order_ids, 'averageprice').astype(float).mean()
@@ -4421,30 +4309,18 @@ def place_synthetic_fut_order(
     strike,
     expiry,
     buy_or_sell,
-    quantity_in_shares,
+    quantity_in_lots,
     prices: str | tuple = "MARKET",
+    stop_loss_order=False,
+    order_tag="",
 ):
     """Places a synthetic future order. Quantity is in number of shares."""
 
-    strike = int(strike)
-    call_symbol, call_token = fetch_symbol_token(name, expiry, strike, "CE")
-    put_symbol, put_token = fetch_symbol_token(name, expiry, strike, "PE")
-
-    if prices == "MARKET":
-        call_price = "MARKET"
-        put_price = "MARKET"
-    else:
-        call_price, put_price = prices
-
-    call_action = "BUY" if buy_or_sell == "BUY" else "SELL"
-    put_action = "SELL" if buy_or_sell == "BUY" else "BUY"
-    order_id_call = place_order(
-        call_symbol, call_token, quantity_in_shares, call_action, call_price
+    syn_fut = SyntheticFuture(strike, name, expiry)
+    call_order_ids, put_order_ids = syn_fut.place_order(
+        buy_or_sell, quantity_in_lots, prices, stop_loss_order, order_tag
     )
-    order_id_put = place_order(
-        put_symbol, put_token, quantity_in_shares, put_action, put_price
-    )
-    return order_id_call, order_id_put
+    return call_order_ids, put_order_ids
 
 
 def cancel_pending_orders(order_ids, variety="STOPLOSS"):
