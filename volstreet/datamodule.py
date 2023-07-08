@@ -789,10 +789,11 @@ def get_1m_data(kite, symbol, path='C:\\Users\\Administrator\\'):
     return full_df
 
 
-def backtest_intraday_trend(index_symbol, trend_threshold=1, eod_client=None):
+def backtest_intraday_trend(one_min_df, beta=1, trend_threshold=1, eod_client=None):
 
-    one_min_df = pd.read_csv(f'data\\{index_symbol}_onemin_prices.csv')
-    one_min_df['date'] = pd.to_datetime(one_min_df['date'])
+    one_min_df = one_min_df.copy()
+    if one_min_df.index.name == 'date':
+        one_min_df = one_min_df.reset_index()
     one_min_df = one_min_df[(one_min_df['date'].dt.time > time(9, 15)) & (one_min_df['date'].dt.time < time(15, 30))]
 
     unavailable_dates = [
@@ -811,7 +812,6 @@ def backtest_intraday_trend(index_symbol, trend_threshold=1, eod_client=None):
 
     vix = client.get_data("VIX", return_columns=["open", "close"])
     vix = vix.resample('B').ffill()
-    beta = get_summary_ratio(index_symbol, 'nifty', client=client)
     vix['open'] = vix['open'] * beta
     vix['close'] = vix['close'] * beta
 
@@ -889,7 +889,7 @@ def daywise_returns_of_intraday_trend(df):
 def calculate_intraday_return_drivers(symbol_one_min_df, day_wise_summary_df, rolling_days=60):
 
     symbol_one_min_df = symbol_one_min_df[
-        (symbol_one_min_df['date'].dt.time > time(9, 15)) & (symbol_one_min_df['date'].dt.time < time(15, 30))
+        (symbol_one_min_df.index.time > time(9, 15)) & (symbol_one_min_df.index.time < time(15, 30))
         ]
     minute_vol = symbol_one_min_df.groupby(symbol_one_min_df.index.date).apply(
         lambda x: x['close'].pct_change().abs().mean() * 100).to_frame()
@@ -897,7 +897,7 @@ def calculate_intraday_return_drivers(symbol_one_min_df, day_wise_summary_df, ro
     minute_vol.columns = ['minute_vol']
 
     open_to_close_trend = symbol_one_min_df.close.groupby(symbol_one_min_df.index.date).apply(
-        lambda x: (x.iloc[-1] / x.iloc[2] - 1) * 100).abs().to_frame()
+        lambda x: (x.iloc[-1] / x.iloc[0] - 1) * 100).abs().to_frame()
     open_to_close_trend.index = pd.to_datetime(open_to_close_trend.index)
     open_to_close_trend.columns = ['open_to_close_trend']
     drivers_of_returns = minute_vol.merge(open_to_close_trend, left_index=True, right_index=True)
