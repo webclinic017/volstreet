@@ -2607,8 +2607,8 @@ class Index:
                 call_iv, put_iv, avg_iv = strangle_iv(
                     callprice=c_ltp,
                     putprice=p_ltp,
-                    callstrike=call_strike,
-                    putstrike=put_strike,
+                    callstrike=traded_strangle.call_strike,
+                    putstrike=traded_strangle.put_strike,
                     spot=spot_price,
                     timeleft=timetoexpiry(expiry)
                 )
@@ -2631,8 +2631,8 @@ class Index:
                     f"\nUnderlying: {self.name}\n"
                     f"Time: {currenttime():%d-%m-%Y %H:%M:%S}\n"
                     f"Underlying LTP: {spot_price}\n"
-                    f"Call Strike: {call_strike}\n"
-                    f"Put Strike: {put_strike}\n"
+                    f"Call Strike: {traded_strangle.call_strike}\n"
+                    f"Put Strike: {traded_strangle.put_strike}\n"
                     f"Call Price: {c_ltp}\n"
                     f"Put Price: {p_ltp}\n"
                     f"MTM Price: {mtm_price}\n"
@@ -2825,41 +2825,20 @@ class Index:
         # Setting strikes and expiry
         order_tag = "Intraday Strangle"
         underlying_ltp = self.fetch_ltp()
-        call_strike = underlying_ltp * (1 + call_strike_offset)
-        put_strike = underlying_ltp * (1 - put_strike_offset)
-        call_strike = findstrike(call_strike, self.base)
-        put_strike = findstrike(put_strike, self.base)
+        temp_call_strike = underlying_ltp * (1 + call_strike_offset)
+        temp_put_strike = underlying_ltp * (1 - put_strike_offset)
+        temp_call_strike = findstrike(temp_call_strike, self.base)
+        temp_put_strike = findstrike(temp_put_strike, self.base)
         expiry = self.current_expiry
 
-        prospective_strangles = get_range_of_strangles(call_strike, put_strike, expiry, range_of_strikes=4)
+        prospective_strangles = get_range_of_strangles(temp_call_strike, temp_put_strike, expiry, range_of_strikes=4)
 
         # Placing the main order
         strangle = most_equal_strangle(*prospective_strangles)
         call_ltp, put_ltp = strangle.fetch_ltp()
-        call_order_ids, put_order_ids = strangle.place_order(
-            "SELL", quantity_in_lots, prices="LIMIT", order_tag=order_tag
+        call_avg_price, put_avg_price = place_option_order_and_notify(
+            strangle, "SELL", quantity_in_lots, "LIMIT", order_tag, self.webhook_url, return_avg_price=True
         )
-        orderbook = fetch_book('orderbook')
-        order_statuses = lookup_and_return(orderbook, 'orderid', call_order_ids+put_order_ids, 'status')
-        check_and_notify_order_statuses(
-            order_statuses,
-            self.webhook_url,
-            target_status="complete",
-            order_tag=order_tag,
-            Underlying=self.name,
-            Action="SELL",
-            Strikes=[call_strike, put_strike],
-            Expiry=expiry,
-            Quantity=quantity_in_lots
-        )
-
-        # Calculating average prices
-        def get_avg_price(book, order_ids, ltp):
-            prices = lookup_and_return(book, ['orderid', 'status'], [order_ids, 'complete'], 'averageprice')
-            return ltp if not isinstance(prices, np.ndarray) else prices.astype(float).mean()
-
-        call_avg_price = get_avg_price(orderbook, call_order_ids, call_ltp)
-        put_avg_price = get_avg_price(orderbook, put_order_ids, put_ltp)
         total_avg_price = call_avg_price + put_avg_price
 
         call_stop_loss_price = call_avg_price * call_stop_loss if call_stop_loss else call_avg_price * stop_loss
@@ -2867,8 +2846,8 @@ class Index:
 
         # Logging information and sending notification
         self.log_combined_order(
-            call_strike=call_strike,
-            put_strike=put_strike,
+            call_strike=strangle.call_strike,
+            put_strike=strangle.put_strike,
             expiry=expiry,
             buy_or_sell="SELL",
             call_price=call_avg_price,
@@ -2883,8 +2862,8 @@ class Index:
         traded_call_iv, traded_put_iv, traded_avg_iv = strangle_iv(
             callprice=call_avg_price,
             putprice=put_avg_price,
-            callstrike=call_strike,
-            putstrike=put_strike,
+            callstrike=strangle.call_strike,
+            putstrike=strangle.put_strike,
             spot=underlying_ltp,
             timeleft=timetoexpiry(expiry)
         )
@@ -2970,27 +2949,13 @@ class Index:
         put_sl = shared_info_dict["put_sl"]
 
         if not call_sl and not put_sl:
-            call_order_ids, put_order_ids = strangle.place_order("BUY", quantity_in_lots, "LIMIT", order_tag=order_tag)
-            order_book = fetch_book('orderbook')
-            order_statuses_ = lookup_and_return(order_book, 'orderid', call_order_ids + put_order_ids, 'status')
-            check_and_notify_order_statuses(
-                order_statuses_,
-                self.webhook_url,
-                target_status="complete",
-                order_tag='Strangle Exit',
-                Underlying=self.name,
-                Action='BUY',
-                Strikes=[strangle.call_option.strike, strangle.put_option.strike],
-                Expiry=strangle.call_option.expiry,
-                Qty=quantity_in_lots,
+            # Both stop losses not hit
+            call_exit_avg_price, put_exit_avg_price = place_option_order_and_notify(
+                strangle, "BUY", quantity_in_lots, "LIMIT", order_tag, self.webhook_url, return_avg_price=True
             )
 
-            shared_info_dict['call_exit_price'] = lookup_and_return(
-                order_book, 'orderid', call_order_ids, 'averageprice'
-            ).astype(float).mean()
-            shared_info_dict['put_exit_price'] = lookup_and_return(
-                order_book, 'orderid', put_order_ids, 'averageprice'
-            ).astype(float).mean()
+            shared_info_dict['call_exit_price'] = call_exit_avg_price
+            shared_info_dict['put_exit_price'] = put_exit_avg_price
 
         elif (call_sl or put_sl) and not (call_sl and put_sl):  # Only one stop loss hit
             exit_option = strangle.put_option if call_sl else strangle.call_option
@@ -3559,7 +3524,8 @@ def place_option_order_and_notify(
     webhook_url=None,
     stop_loss_order: bool = False,
     target_status: str = "complete",
-    return_avg_price: bool = True
+    return_avg_price: bool = True,
+    **kwargs
 ):
 
     notify_dict = {
@@ -3595,23 +3561,36 @@ def place_option_order_and_notify(
     else:
         raise ValueError("Invalid instrument type")
 
+    notify_dict.update(kwargs)
+
     if stop_loss_order:
         assert isinstance(prices, (int, float, tuple, list, np.ndarray)), "Stop loss order requires a price"
 
     # Placing the order
     order_ids = instrument.place_order(**order_params)
 
-    if isinstance(order_ids, tuple):
-        # Merge the order IDs into a single list
-        order_ids = list(itertools.chain(*order_ids))
+    if isinstance(order_ids, tuple):  # Strangle/Straddle/SyntheticFuture
+        call_order_ids, put_order_ids = order_ids[0], order_ids[1]
+        order_ids = list(itertools.chain(call_order_ids, put_order_ids))
+    else:  # Option
+        call_order_ids, put_order_ids = False, False
 
     order_book = fetch_book('orderbook')
     order_statuses_ = lookup_and_return(order_book, 'orderid', order_ids, 'status')
     check_and_notify_order_statuses(order_statuses_, webhook_url, **notify_dict)
 
     if return_avg_price:
-        avg_price = lookup_and_return(order_book, 'orderid', order_ids, 'averageprice').astype(float).mean()
-        return avg_price
+        if call_order_ids and put_order_ids:
+            call_avg_price = lookup_and_return(
+                order_book, 'orderid', call_order_ids, 'averageprice'
+            ).astype(float).mean()
+            put_avg_price = lookup_and_return(
+                order_book, 'orderid', put_order_ids, 'averageprice'
+            ).astype(float).mean()
+            return call_avg_price, put_avg_price
+        else:
+            avg_price = lookup_and_return(order_book, 'orderid', order_ids, 'averageprice').astype(float).mean()
+            return avg_price
 
     return order_ids
 
@@ -4176,8 +4155,22 @@ def calc_greeks(position_string, position_price, underlying_price):
     return iv, delta, gamma
 
 
-def most_equal_strangle(*strangles):
-    return min(strangles, key=lambda strangle: strangle.price_disparity())
+def most_equal_strangle(*strangles: Strangle):
+
+    ltp_cache = {}
+    call_set = set(strangle.call_option for strangle in strangles)
+    put_set = set(strangle.put_option for strangle in strangles)
+    union_set = call_set.union(put_set)
+    for option in union_set:
+        ltp_cache[option] = option.fetch_ltp()
+
+    # Use the LTPs from the cache when calculating the price disparity
+    def price_disparity(_strangle):
+        call_ltp = ltp_cache[_strangle.call_option]
+        put_ltp = ltp_cache[_strangle.put_option]
+        disparity = abs(call_ltp - put_ltp) / min(call_ltp, put_ltp)
+        return disparity
+    return min(strangles, key=price_disparity)
 
 
 def get_current_vix():
