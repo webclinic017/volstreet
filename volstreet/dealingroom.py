@@ -568,6 +568,11 @@ class Strangle:
         ), fetchltp("NFO", self.put_symbol, self.put_token)
         return call_ltp + put_ltp
 
+    def price_disparity(self):
+        call_ltp, put_ltp = self.fetch_ltp()
+        disparity = abs(call_ltp - put_ltp)/min(call_ltp, put_ltp)
+        return disparity
+
     def fetch_symbol_token(self):
         return self.call_symbol, self.call_token, self.put_symbol, self.put_token
 
@@ -2650,6 +2655,25 @@ class Index:
                     last_notify_time = currenttime()
                 sleep(sleep_time)
 
+        def get_range_of_strangles(c_strike, p_strike, exp, range_of_strikes=4):
+            if range_of_strikes % 2 != 0:
+                range_of_strikes += 1
+            c_strike_range = np.arange(
+                c_strike - (range_of_strikes / 2) * self.base,
+                c_strike + (range_of_strikes / 2) * self.base + self.base,
+                self.base
+            )
+            if c_strike == p_strike:
+                return [Straddle(strike, self.name, exp) for strike in c_strike_range]
+            else:
+                p_strike_ranges = np.arange(
+                        p_strike - (range_of_strikes/2)*self.base,
+                        p_strike + (range_of_strikes/2)*self.base + self.base,
+                        self.base
+                )
+                pairs = itertools.product(c_strike_range, p_strike_ranges)
+                return [Strangle(pair[0], pair[1], self.name, exp) for pair in pairs]
+
         @log_errors
         def trend_catcher(info_dict, sl_type, qty_ratio, sl, strike_offset):
 
@@ -2807,8 +2831,10 @@ class Index:
         put_strike = findstrike(put_strike, self.base)
         expiry = self.current_expiry
 
+        prospective_strangles = get_range_of_strangles(call_strike, put_strike, expiry, range_of_strikes=4)
+
         # Placing the main order
-        strangle = Strangle(call_strike=call_strike, put_strike=put_strike, underlying=self.name, expiry=expiry)
+        strangle = most_equal_strangle(*prospective_strangles)
         call_ltp, put_ltp = strangle.fetch_ltp()
         call_order_ids, put_order_ids = strangle.place_order(
             "SELL", quantity_in_lots, prices="LIMIT", order_tag=order_tag
@@ -4148,6 +4174,10 @@ def calc_greeks(position_string, position_price, underlying_price):
     gamma = bs.gamma(underlying_price, strike, time_left, 0.05, iv)
 
     return iv, delta, gamma
+
+
+def most_equal_strangle(*strangles):
+    return min(strangles, key=lambda strangle: strangle.price_disparity())
 
 
 def get_current_vix():
