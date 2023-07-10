@@ -2579,7 +2579,9 @@ class Index:
 
             # Price deque
             n_prices = max(int(30/sleep_time), 1)  # Hard coded 30-second price window for now
-            last_n_prices = {"call": deque(maxlen=n_prices), "put": deque(maxlen=n_prices)}
+            last_n_prices = {
+                "call": deque(maxlen=n_prices), "put": deque(maxlen=n_prices), "underlying": deque(maxlen=n_prices)
+            }
 
             last_print_time = currenttime()
             last_log_time = currenttime()
@@ -2598,10 +2600,14 @@ class Index:
                 info_dict["put_ltp"] = p_ltp
                 last_n_prices["call"].append(c_ltp)
                 last_n_prices["put"].append(p_ltp)
+                last_n_prices["underlying"].append(spot_price)
                 c_ltp_avg = sum(last_n_prices["call"])/len(last_n_prices["call"]) if last_n_prices["call"] else c_ltp
                 p_ltp_avg = sum(last_n_prices["put"])/len(last_n_prices["put"]) if last_n_prices["put"] else p_ltp
+                spot_price_avg = sum(last_n_prices["underlying"])/len(last_n_prices["underlying"]) \
+                    if last_n_prices["underlying"] else spot_price
                 info_dict["call_ltp_avg"] = c_ltp_avg
                 info_dict["put_ltp_avg"] = p_ltp_avg
+                info_dict["underlying_ltp_avg"] = spot_price_avg
 
                 # Calculate IV
                 call_iv, put_iv, avg_iv = strangle_iv(
@@ -2709,7 +2715,8 @@ class Index:
             print_interval = timedelta(seconds=10)
             while all([currenttime().time() < time(*exit_time), not info_dict["exit_triggers"]["trade_complete"]]):
                 spot_price = info_dict["underlying_ltp"]
-                trend_sl_hit = spot_price < sl_price if sl_type == "call" else spot_price > sl_price
+                spot_price_avg = info_dict["underlying_ltp_avg"]
+                trend_sl_hit = spot_price_avg < sl_price if sl_type == "call" else spot_price_avg > sl_price
                 if trend_sl_hit:
                     break
                 sleep(sleep_time)
@@ -2717,8 +2724,8 @@ class Index:
                     last_print_time = currenttime()
                     print(
                         f"{self.name} {sl_type} trend catcher running\n"
-                        + f"Stoploss price: {sl_price}, Underlying Price: {spot_price}\n"
-                        + f"Stoploss hit: {trend_sl_hit}\n"
+                        + f"Stoploss price: {sl_price}, Underlying price: {spot_price}\n"
+                        + f"Underlying price avg: {spot_price_avg}, Stoploss hit: {trend_sl_hit}\n"
                     )
 
             if trend_sl_hit:
@@ -3010,7 +3017,7 @@ class Index:
             quantity_in_lots,
             start_time=(9, 15, 55),
             exit_time=(15, 27),
-            sleep_time=20,
+            sleep_time=5,
             threshold_movement=None,
     ):
 
@@ -3035,6 +3042,10 @@ class Index:
         upper_limit = open_price * (1 + threshold_movement / 100)
         lower_limit = open_price * (1 - threshold_movement / 100)
 
+        # Price deque
+        n_prices = max(int(30 / sleep_time), 1)  # hard coding 30 minutes for now
+        price_deque = deque(maxlen=n_prices)
+
         notifier(
             f"{self.name} trender starting with {threshold_movement:0.2f} threshold movement\n"
             f"Current Price: {open_price}\nUpper limit: {upper_limit:0.2f}\n"
@@ -3045,7 +3056,10 @@ class Index:
         while (
                 abs(movement) < threshold_movement and currenttime().time() < scan_end_time
         ):
-            movement = ((self.fetch_ltp() / open_price) - 1) * 100
+            ltp = self.fetch_ltp()
+            price_deque.append(ltp)
+            ltp_avg = sum(price_deque) / len(price_deque) if price_deque else ltp
+            movement = ((ltp_avg / open_price) - 1) * 100
             if currenttime() > last_print_time + timedelta(minutes=1):
                 print(f"{self.name} trender: {movement:0.2f} movement.")
                 last_print_time = currenttime()
@@ -3072,11 +3086,17 @@ class Index:
         )
 
         while currenttime().time() < exit_time and not stop_loss_hit:
+
+            ltp = self.fetch_ltp()
+            price_deque.append(ltp)
+            ltp_avg = sum(price_deque) / len(price_deque) if price_deque else ltp
+
             if position == "BUY":
-                stop_loss_hit = self.fetch_ltp() < stop_loss_price
+                stop_loss_hit = ltp_avg < stop_loss_price
             else:
-                stop_loss_hit = self.fetch_ltp() > stop_loss_price
+                stop_loss_hit = ltp_avg > stop_loss_price
             sleep(sleep_time)
+
         stop_loss_message = "Trender stop loss hit. " if stop_loss_hit else ""
         notifier(
             f"{stop_loss_message}{self.name} trender exiting. {self.name} at {self.fetch_ltp()}.",
