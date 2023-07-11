@@ -3019,6 +3019,7 @@ class Index:
             exit_time=(15, 27),
             sleep_time=5,
             threshold_movement=None,
+            minutes_to_avg=45,
     ):
 
         while currenttime().time() < time(*start_time):
@@ -3043,7 +3044,7 @@ class Index:
         lower_limit = open_price * (1 - threshold_movement / 100)
 
         # Price deque
-        n_prices = max(int(30 / sleep_time), 1)  # hard coding 30 minutes for now
+        n_prices = max(int(minutes_to_avg / sleep_time), 1)
         price_deque = deque(maxlen=n_prices)
 
         notifier(
