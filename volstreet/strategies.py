@@ -41,9 +41,8 @@ def intraday_options_on_indices(
     webhook_url=None,
     shared_data=True,
     start_time=(9, 16),
-    special_parameters=None
+    special_parameters=None,
 ):
-
     """
     :param parameters: parameters for the strategy (refer to the strategy's docstring)
     :param strategy: 'straddle' or 'strangle' will invoke intraday_straddle or intraday_strangle of the index
@@ -85,9 +84,7 @@ def intraday_options_on_indices(
 
     indices = vs.get_strangle_indices_to_trade(nifty, bnf, fin, midcap)
 
-    parameters["quantity_in_lots"] = (
-        parameters["quantity_in_lots"] // len(indices)
-    )
+    parameters["quantity_in_lots"] = parameters["quantity_in_lots"] // len(indices)
 
     # Setting the shared data
     if shared_data:
@@ -102,9 +99,13 @@ def intraday_options_on_indices(
     for index in indices:
         index_parameters = parameters.copy()
         index_parameters.update(special_parameters.get(index.name, {}))
-        vs.logger.info(f"Trading {index.name} {strategy} with parameters {index_parameters}")
+        vs.logger.info(
+            f"Trading {index.name} {strategy} with parameters {index_parameters}"
+        )
         vs.notifier(f"Trading {index.name} {strategy}.", discord_webhook_url)
-        thread = threading.Thread(target=getattr(index, f'intraday_{strategy}'), kwargs=index_parameters)
+        thread = threading.Thread(
+            target=getattr(index, f"intraday_{strategy}"), kwargs=index_parameters
+        )
         options_threads.append(thread)
 
     # Wait for the market to open
@@ -190,7 +191,6 @@ def intraday_trend_on_indices(
     authkey=None,
     webhook_url=None,
 ):
-
     """
 
     :param parameters: parameters for the strategy (refer to the strategy's docstring)
@@ -232,9 +232,7 @@ def intraday_trend_on_indices(
     threads = []
     for index_symbol in indices:
         index = vs.Index(index_symbol, webhook_url=discord_webhook_url)
-        thread = threading.Thread(
-            target=index.intraday_trend, kwargs=parameters
-        )
+        thread = threading.Thread(target=index.intraday_trend, kwargs=parameters)
         threads.append(thread)
 
     for thread in threads:
@@ -274,7 +272,11 @@ def index_vs_constituents(
         int(total_exposure / (index.fetch_ltp() * index.lot_size)) * index.lot_size,
     )
     index_premium_value = index_info["total_price"] * index_shares
-    index_break_even_points = (index_info["underlying_price"], index_info["call_strike"], index_info["put_strike"])
+    index_break_even_points = (
+        index_info["underlying_price"],
+        index_info["call_strike"],
+        index_info["put_strike"],
+    )
     index_break_even_points += (
         index_info["call_strike"] + index_info["total_price"],
         index_info["put_strike"] - index_info["total_price"],
