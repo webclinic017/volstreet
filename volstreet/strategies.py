@@ -41,7 +41,7 @@ def intraday_options_on_indices(
     webhook_url=None,
     shared_data=True,
     start_time=(9, 16),
-    multi_before_weekend=True,
+    special_parameters=None
 ):
 
     """
@@ -55,9 +55,12 @@ def intraday_options_on_indices(
     :param webhook_url:
     :param shared_data:
     :param start_time:
-    :param multi_before_weekend:
+    :param special_parameters: special parameters for a particular index
     :return:
     """
+
+    if special_parameters is None:
+        special_parameters = {}
 
     user, pin, apikey, authkey, discord_webhook_url = get_user_data(
         client, user, pin, apikey, authkey, webhook_url
@@ -78,13 +81,12 @@ def intraday_options_on_indices(
     nifty = vs.Index("NIFTY", webhook_url=discord_webhook_url)
     bnf = vs.Index("BANKNIFTY", webhook_url=discord_webhook_url)
     fin = vs.Index("FINNIFTY", webhook_url=discord_webhook_url)
+    midcap = vs.Index("MIDCPNIFTY", webhook_url=discord_webhook_url)
 
-    indices = vs.indices_to_trade(
-        nifty, bnf, fin, multi_before_weekend=multi_before_weekend
-    )
-    quantity_multiplier = 2 if len(indices) == 1 else 1
+    indices = vs.get_strangle_indices_to_trade(nifty, bnf, fin, midcap)
+
     parameters["quantity_in_lots"] = (
-        parameters["quantity_in_lots"] * quantity_multiplier
+        parameters["quantity_in_lots"] // len(indices)
     )
 
     # Setting the shared data
@@ -98,8 +100,11 @@ def intraday_options_on_indices(
 
     options_threads = []
     for index in indices:
+        index_parameters = parameters.copy()
+        index_parameters.update(special_parameters.get(index.name, {}))
+        vs.logger.info(f"Trading {index.name} {strategy} with parameters {index_parameters}")
         vs.notifier(f"Trading {index.name} {strategy}.", discord_webhook_url)
-        thread = threading.Thread(target=getattr(index, f'intraday_{strategy}'), kwargs=parameters)
+        thread = threading.Thread(target=getattr(index, f'intraday_{strategy}'), kwargs=index_parameters)
         options_threads.append(thread)
 
     # Wait for the market to open
@@ -176,18 +181,37 @@ def overnight_straddle_nifty(
 
 
 def intraday_trend_on_indices(
+    parameters,
     indices,
-    quantity_in_lots,
     client=None,
     user=None,
     pin=None,
     apikey=None,
     authkey=None,
     webhook_url=None,
-    start_time=(9, 15, 55),
-    exit_time=(15, 27),
-    sleep_time=20,
 ):
+
+    """
+
+    :param parameters: parameters for the strategy (refer to the strategy's docstring)
+                       summary of parameters:
+                       quantity_in_lots,
+                       start_time=(9, 15, 58),
+                       exit_time=(15, 27),
+                       sleep_time=5,
+                       threshold_movement=None,
+                       minutes_to_avg=45,
+                       beta=0.8,
+                       max_entries=3
+    :param indices: list of indices to trade
+    :param client: client's name
+    :param user: username
+    :param pin: user's pin
+    :param apikey: user apikey
+    :param authkey: user authkey
+    :param webhook_url: discord webhook url
+
+    """
 
     user, pin, apikey, authkey, discord_webhook_url = get_user_data(
         client, user, pin, apikey, authkey, webhook_url
@@ -209,7 +233,7 @@ def intraday_trend_on_indices(
     for index_symbol in indices:
         index = vs.Index(index_symbol, webhook_url=discord_webhook_url)
         thread = threading.Thread(
-            target=index.intraday_trend, args=(quantity_in_lots, start_time, exit_time, sleep_time)
+            target=index.intraday_trend, kwargs=parameters
         )
         threads.append(thread)
 

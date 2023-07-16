@@ -765,7 +765,7 @@ def get_1m_data(kite, symbol, path='C:\\Users\\Administrator\\'):
         main_df = False
         from_date = datetime(2015, 1, 1, 9, 16)
 
-    end_date = datetime.now()
+    end_date = vs.currenttime()
     mainlist = []
 
     fetch_data_partial = partial(fetch_minute_data_from_kite, kite, token)
@@ -773,11 +773,16 @@ def get_1m_data(kite, symbol, path='C:\\Users\\Administrator\\'):
     while from_date < end_date:
         to_date = from_date + timedelta(days=60)
         prices = fetch_data_partial(from_date, to_date)
-        if len(prices) < 2:
+        if len(prices) < 2 and not mainlist:  # if there is no data for the period and no data at all
             print(f'No data for {from_date.strftime("%Y-%m-%d %H:%M:%S")} to {to_date.strftime("%Y-%m-%d %H:%M:%S")}')
-            return None
-        mainlist.extend(prices)
-        from_date += timedelta(days=60)
+            if to_date > vs.currenttime():
+                return None
+            else:
+                from_date += timedelta(days=60)
+                continue
+        else:  # if there is data for the period
+            mainlist.extend(prices)
+            from_date += timedelta(days=60)
 
     df = pd.DataFrame(mainlist).set_index('date')
     df.index = df.index.tz_localize(None)
@@ -789,7 +794,16 @@ def get_1m_data(kite, symbol, path='C:\\Users\\Administrator\\'):
     return full_df
 
 
-def backtest_intraday_trend(one_min_df, beta=1, trend_threshold=1, eod_client=None):
+def get_constituent_1m_data(kite_object, index_name, path='C:\\Users\\Administrator\\'):
+    tickers, _weights = vs.get_index_constituents(index_name)
+    for ticker in tickers:
+        print(f'Fetching data for {ticker}')
+        get_1m_data(kite_object, ticker, path=path)
+
+
+def backtest_intraday_trend(
+        one_min_df, beta=1, trend_threshold=1, max_entries=3, eod_client=None, rolling_days=60
+):
 
     one_min_df = one_min_df.copy()
     if one_min_df.index.name == 'date':
@@ -819,71 +833,102 @@ def backtest_intraday_trend(one_min_df, beta=1, trend_threshold=1, eod_client=No
     open_prices = one_min_df.groupby(one_min_df['date'].dt.date).close.first().to_frame()
     open_data = open_prices.merge(vix['open'].to_frame(), left_index=True, right_index=True)
     open_data['threshold_movement'] = (open_data['open'] / 48) * trend_threshold
-    one_min_df[['day_open', 'open_vix', 'threshold_movement']] = open_data.loc[one_min_df['date'].dt.date].values
+    open_data['upper_bound'] = open_data['close'] * (1 + open_data['threshold_movement'] / 100)
+    open_data['lower_bound'] = open_data['close'] * (1 - open_data['threshold_movement'] / 100)
+    open_data['day_close'] = one_min_df.groupby(one_min_df['date'].dt.date).close.last()
+    open_data.columns = ['day_open', 'open_vix', 'threshold_movement', 'upper_bound', 'lower_bound', 'day_close']
+    one_min_df[
+        ['day_open', 'open_vix', 'threshold_movement', 'upper_bound', 'lower_bound', 'day_close']
+    ] = open_data.loc[one_min_df['date'].dt.date].values
     one_min_df['change_from_open'] = ((one_min_df['close']/one_min_df['day_open']) - 1)*100
 
     def calculate_daily_trade_data(group):
-        result_dict = {
-            'returns': 0,
-            'trigger_time': np.nan,
-            'trigger_price': np.nan,
-            'stop_loss_price': np.nan
-        }
+        all_entries_in_a_day = {}
         # Find the first index where the absolute price change crosses the threshold
-        idx = group[abs(group['change_from_open']) >= group['threshold_movement']].first_valid_index()
-        if idx is not None:
-            # Record the price and time of crossing the threshold
-            cross_price = group.loc[idx, 'close']
-            cross_time = group.loc[idx, 'date']
+        entry = 1
+        while entry <= max_entries:
+            idx = group[abs(group['change_from_open']) >= group['threshold_movement']].first_valid_index()
+            if idx is not None:  # if there is a crossing
+                result_dict = {
+                    'returns': 0,
+                    'trigger_time': np.nan,
+                    'trigger_price': np.nan,
+                    'trend_direction': np.nan,
+                    'stop_loss_price': np.nan,
+                    'stop_loss_time': np.nan
+                }
+                # Record the price and time of crossing the threshold
+                cross_price = group.loc[idx, 'close']
+                cross_time = group.loc[idx, 'date']
 
-            # Determine the direction of the movement
-            direction = np.sign(group.loc[idx, 'change_from_open'])
+                # Determine the direction of the movement
+                direction = np.sign(group.loc[idx, 'change_from_open'])
 
-            # Calculate the stoploss price
-            stoploss_price = cross_price * (1 - 0.003 * direction)
+                # Calculate the stoploss price
+                stoploss_price = cross_price * (1 - 0.003 * direction)
+                result_dict.update({
+                    'trigger_time': cross_time,
+                    'trigger_price': cross_price,
+                    'trend_direction': direction,
+                    'stop_loss_price': stoploss_price
+                })
+                future_prices = group.loc[idx:, 'close']
 
-            # Check if the stoploss was breached after crossing the threshold
-            future_prices = group.loc[idx:, 'close']
-            if (
-                    direction == 1 and future_prices.min() <= stoploss_price) \
-                    or (direction == -1 and future_prices.max() >= stoploss_price
-            ):
-                result_dict['returns'] = -0.30
+                if (
+                        (direction == 1 and future_prices.min() <= stoploss_price)
+                        or (direction == -1 and future_prices.max() >= stoploss_price)
+                ):  # Stop loss was breached
+                    result_dict['returns'] = -0.30
+                    stoploss_time_idx = future_prices[future_prices <= stoploss_price].first_valid_index() \
+                        if direction == 1 else future_prices[future_prices >= stoploss_price].first_valid_index()
+                    stoploss_time = group.loc[stoploss_time_idx, 'date']
+                    result_dict['stop_loss_time'] = stoploss_time
+                    all_entries_in_a_day[f'entry_{entry}'] = result_dict
+                    group = group.loc[stoploss_time_idx:]
+                    entry += 1
+                else:  # Stop loss was not breached
+                    if direction == 1:
+                        result_dict['returns'] = ((group['close'].iloc[-1] - cross_price) / cross_price)*100
+                    else:
+                        result_dict['returns'] = ((group['close'].iloc[-1] - cross_price) / cross_price)*-100
+                    all_entries_in_a_day[f'entry_{entry}'] = result_dict
+                    break
             else:
-                # Return the change from the entry price to the last price of the day
-                if direction == 1:
-                    result_dict['returns'] = ((group['close'].iloc[-1] - cross_price) / cross_price)*100
-                else:
-                    result_dict['returns'] = ((group['close'].iloc[-1] - cross_price) / cross_price)*-100
+                break
 
-            result_dict.update({
-                'trigger_time': cross_time,
-                'trigger_price': cross_price,
-                'stop_loss_price': stoploss_price
-            })
-        return result_dict
+        all_entries_in_a_day['total_returns'] = sum([v['returns'] for v in all_entries_in_a_day.values()])
+        return all_entries_in_a_day
 
     # Applying the function to each day's worth of data
     returns = one_min_df.groupby(one_min_df['date'].dt.date).apply(calculate_daily_trade_data)
-    returns = returns.apply(pd.Series)
+    returns = returns.to_frame()
+    returns.index = pd.to_datetime(returns.index)
+    returns.columns = ['trade_data']
 
-    # creating a new column with the date
-    one_min_df.rename(columns={'date': 'timestamp'}, inplace=True)
-    one_min_df['date'] = one_min_df['timestamp'].dt.date
+    # merging with open_data
+    merged = returns.merge(open_data, left_index=True, right_index=True)
+    merged['total_returns'] = merged['trade_data'].apply(lambda x: x['total_returns'])
+    merged = nav_drawdown_analyser(merged, column_to_convert='total_returns', profit_in_pct=True)
 
-    # merging the returns with the original data
-    one_min_df = one_min_df.merge(returns, left_on='date', right_index=True)
+    # calculating the minute vol
+    merged['minute_vol'] = one_min_df.groupby(one_min_df['date'].dt.date).apply(
+        lambda x: x['close'].pct_change().abs().mean() * 100).to_frame()
 
-    return one_min_df
+    # calculating the open to close trend
+    merged['open_to_close_trend'] = one_min_df.close.groupby(one_min_df['date'].dt.date).apply(
+        lambda x: (x.iloc[-1] / x.iloc[0] - 1) * 100).abs().to_frame()
 
+    # calculating the ratio and rolling mean
+    rolling_days = rolling_days
+    merged['minute_vol_rolling'] = merged['minute_vol'].rolling(rolling_days,
+                                                                min_periods=1).mean()
+    merged['open_to_close_trend_rolling'] = merged['open_to_close_trend'].rolling(
+        rolling_days, min_periods=1).mean()
+    merged['ratio'] = merged['open_to_close_trend'] / merged['minute_vol']
+    merged['rolling_ratio'] = merged['open_to_close_trend_rolling'] / merged[
+        'minute_vol_rolling']
 
-def daywise_returns_of_intraday_trend(df):
-
-    daywise_summary = df.groupby(df["timestamp"].dt.date).agg(
-        {'returns': 'first', 'trigger_time': 'first', 'trigger_price': 'first', 'stop_loss_price': 'first'})
-    daywise_summary.index = pd.to_datetime(daywise_summary.index)
-    daywise_summary = nav_drawdown_analyser(daywise_summary, column_to_convert='returns', profit_in_pct=True)
-    return daywise_summary
+    return merged
 
 
 def calculate_intraday_return_drivers(symbol_one_min_df, day_wise_summary_df, rolling_days=60):
@@ -902,7 +947,7 @@ def calculate_intraday_return_drivers(symbol_one_min_df, day_wise_summary_df, ro
     open_to_close_trend.columns = ['open_to_close_trend']
     drivers_of_returns = minute_vol.merge(open_to_close_trend, left_index=True, right_index=True)
     drivers_of_returns = drivers_of_returns.merge(
-        day_wise_summary_df.returns.to_frame(), left_index=True, right_index=True
+        day_wise_summary_df.total_returns.to_frame(), left_index=True, right_index=True
     )
 
     # Rolling the minute vol and open to close trend
