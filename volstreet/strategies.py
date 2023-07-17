@@ -41,6 +41,7 @@ def intraday_options_on_indices(
     webhook_url=None,
     shared_data=True,
     start_time=(9, 16),
+    safe_indices=None,
     special_parameters=None,
 ):
     """
@@ -54,6 +55,7 @@ def intraday_options_on_indices(
     :param webhook_url:
     :param shared_data:
     :param start_time:
+    :param safe_indices: list of indices to be traded when no clear close expiry is available
     :param special_parameters: special parameters for a particular index
     :return:
     """
@@ -82,7 +84,7 @@ def intraday_options_on_indices(
     fin = vs.Index("FINNIFTY", webhook_url=discord_webhook_url)
     midcap = vs.Index("MIDCPNIFTY", webhook_url=discord_webhook_url)
 
-    indices = vs.get_strangle_indices_to_trade(nifty, bnf, fin, midcap)
+    indices = vs.get_strangle_indices_to_trade(nifty, bnf, fin, midcap, safe_indices)
 
     parameters["quantity_in_lots"] = parameters["quantity_in_lots"] // len(indices)
 

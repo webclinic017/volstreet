@@ -2952,7 +2952,7 @@ class Index:
                     justify_stop_loss(info_dict, side)
                     info_dict[f"{side}_sl"] = True
                 if not orders_complete:
-                    info_dict[f"{side}_sl_order_ids"] = None
+                    info_dict[f"{side}_stop_loss_order_ids"] = None
 
         def process_stop_loss(info_dict, sl_type):
             if (
@@ -2964,7 +2964,7 @@ class Index:
             other_side = "call" if sl_type == "put" else "put"
 
             # Buying the stop loss option back if it is not already bought
-            if info_dict[f"{sl_type}_sl_order_ids"] is None:
+            if info_dict[f"{sl_type}_stop_loss_order_ids"] is None:
                 option_to_buy = (
                     traded_strangle.call_option
                     if sl_type == "call"
@@ -2984,7 +2984,7 @@ class Index:
                     lookup_and_return(
                         orderbook,
                         "orderid",
-                        info_dict[f"{sl_type}_sl_order_ids"],
+                        info_dict[f"{sl_type}_stop_loss_order_ids"],
                         "averageprice",
                     )
                     .astype(float)
@@ -3040,7 +3040,7 @@ class Index:
                     info_dict, other_side, refresh_orderbook=refresh_orderbook
                 )
                 if info_dict[f"{other_side}_sl"]:
-                    if info_dict[f"{other_side}_sl_order_ids"] is None:
+                    if info_dict[f"{other_side}_stop_loss_order_ids"] is None:
                         other_sl_option = (
                             traded_strangle.call_option
                             if other_side == "call"
@@ -3064,7 +3064,7 @@ class Index:
                             lookup_and_return(
                                 orderbook,
                                 "orderid",
-                                info_dict[f"{other_side}_sl_order_ids"],
+                                info_dict[f"{other_side}_stop_loss_order_ids"],
                                 "averageprice",
                             )
                             .astype(float)
