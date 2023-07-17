@@ -2961,7 +2961,7 @@ class Index:
                 return
 
             traded_strangle = info_dict["traded_strangle"]
-            other_side = "call" if sl_type == "put" else "put"
+            other_side: str = "call" if sl_type == "put" else "put"
 
             # Buying the stop loss option back if it is not already bought
             if info_dict[f"{sl_type}_stop_loss_order_ids"] is None:
@@ -3306,9 +3306,9 @@ class Index:
             shared_info_dict["put_exit_price"] = put_exit_avg_price
 
         elif (call_sl or put_sl) and not (call_sl and put_sl):  # Only one stop loss hit
-            exit_option = "put" if call_sl else "call"
+            exit_option_type: str = "put" if call_sl else "call"
             if shared_info_dict["time_left_day_start"] * 365 < 1:  # expiry day
-                non_sl_exit_price = shared_info_dict[f"{exit_option}_ltp"]
+                non_sl_exit_price = shared_info_dict[f"{exit_option_type}_ltp"]
             else:
                 exit_option = strangle.put_option if call_sl else strangle.call_option
                 non_sl_exit_price = place_option_order_and_notify(
@@ -3319,7 +3319,7 @@ class Index:
                     order_tag,
                     self.webhook_url,
                 )
-            shared_info_dict[f"{exit_option}_exit_price"] = non_sl_exit_price
+            shared_info_dict[f"{exit_option_type}_exit_price"] = non_sl_exit_price
 
         else:  # Both stop losses hit
             pass
@@ -3397,8 +3397,8 @@ class Index:
 
         notifier(
             f"{self.name} trender starting with {threshold_movement:0.2f} threshold movement\n"
-            f"Current Price: {open_price}\nUpper limit: {price_boundaries[1]:0.2f}\n"
-            f"Lower limit: {price_boundaries[0]:0.2f}.",
+            f"Current Price: {open_price}\nUpper limit: {price_boundaries[0]:0.2f}\n"
+            f"Lower limit: {price_boundaries[1]:0.2f}.",
             self.webhook_url,
         )
 
