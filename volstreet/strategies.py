@@ -84,7 +84,7 @@ def intraday_options_on_indices(
     fin = vs.Index("FINNIFTY", webhook_url=discord_webhook_url)
     midcap = vs.Index("MIDCPNIFTY", webhook_url=discord_webhook_url)
 
-    indices = vs.get_strangle_indices_to_trade(nifty, bnf, fin, midcap, safe_indices)
+    indices = vs.get_strangle_indices_to_trade(nifty, bnf, fin, midcap, safe_indices=safe_indices)
 
     parameters["quantity_in_lots"] = parameters["quantity_in_lots"] // len(indices)
 
