@@ -718,6 +718,9 @@ def get_index_vs_constituents_recent_vols(
         summary_df = index_monthly_data[
             ["index_abs_change", "sum_constituent_movement", "ratio_of_movements"]
         ]
+        summary_df['index_rolling'] = summary_df['index_abs_change'].rolling(12, min_periods=1).mean()
+        summary_df['cons_rolling'] = summary_df['sum_constituent_movement'].rolling(12, min_periods=1).mean()
+        summary_df['rolling_ratio'] = summary_df['cons_rolling'] / summary_df['index_rolling']
         return summary_df
 
 
@@ -859,6 +862,7 @@ def get_constituent_1m_data(kite_object, index_name, path="C:\\Users\\Administra
 
 def backtest_intraday_trend(
     one_min_df,
+    open_nth=0,
     beta=1,
     trend_threshold=1,
     max_entries=3,
@@ -897,16 +901,16 @@ def backtest_intraday_trend(
         inplace=True,
     )
     open_prices = (
-        one_min_df.groupby(one_min_df["date"].dt.date).close.first().to_frame()
+        one_min_df.groupby(one_min_df["date"].dt.date).apply(lambda x: x.iloc[open_nth]).open.to_frame()
     )
     open_data = open_prices.merge(
-        vix["open"].to_frame(), left_index=True, right_index=True
+        vix["open"].to_frame(), left_index=True, right_index=True, suffixes=("", "_vix")
     )
-    open_data["threshold_movement"] = (open_data["open"] / 48) * trend_threshold
-    open_data["upper_bound"] = open_data["close"] * (
+    open_data["threshold_movement"] = (open_data["open_vix"] / 48) * trend_threshold
+    open_data["upper_bound"] = open_data["open"] * (
         1 + open_data["threshold_movement"] / 100
     )
-    open_data["lower_bound"] = open_data["close"] * (
+    open_data["lower_bound"] = open_data["open"] * (
         1 - open_data["threshold_movement"] / 100
     )
     open_data["day_close"] = one_min_df.groupby(one_min_df["date"].dt.date).close.last()

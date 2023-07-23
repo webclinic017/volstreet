@@ -2951,8 +2951,8 @@ class Index:
                 if orders_triggered:
                     justify_stop_loss(info_dict, side)
                     info_dict[f"{side}_sl"] = True
-                if not orders_complete:
-                    info_dict[f"{side}_stop_loss_order_ids"] = None
+                    if not orders_complete:
+                        info_dict[f"{side}_stop_loss_order_ids"] = None
 
         def process_stop_loss(info_dict, sl_type):
             if (
@@ -3370,7 +3370,7 @@ class Index:
         exit_time=(15, 27),
         sleep_time=5,
         threshold_movement=None,
-        minutes_to_avg=45,
+        seconds_to_avg=45,
         beta=0.8,
         max_entries=3,
     ):
@@ -3392,7 +3392,7 @@ class Index:
         ]
 
         # Price deque
-        n_prices = max(int(minutes_to_avg / sleep_time), 1)
+        n_prices = max(int(seconds_to_avg / sleep_time), 1)
         price_deque = deque(maxlen=n_prices)
 
         notifier(
