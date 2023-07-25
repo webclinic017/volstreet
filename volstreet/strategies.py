@@ -192,6 +192,7 @@ def intraday_trend_on_indices(
     apikey=None,
     authkey=None,
     webhook_url=None,
+    special_parameters=None,
 ):
     """
 
@@ -202,7 +203,7 @@ def intraday_trend_on_indices(
                        exit_time=(15, 27),
                        sleep_time=5,
                        threshold_movement=None,
-                       minutes_to_avg=45,
+                       seconds_to_avg=45,
                        beta=0.8,
                        max_entries=3
     :param indices: list of indices to trade
@@ -212,6 +213,7 @@ def intraday_trend_on_indices(
     :param apikey: user apikey
     :param authkey: user authkey
     :param webhook_url: discord webhook url
+    :param special_parameters: special parameters for a particular index
 
     """
 
@@ -233,8 +235,10 @@ def intraday_trend_on_indices(
 
     threads = []
     for index_symbol in indices:
+        index_parameters = parameters.copy()
+        index_parameters.update(special_parameters.get(index_symbol, {}))
         index = vs.Index(index_symbol, webhook_url=discord_webhook_url)
-        thread = threading.Thread(target=index.intraday_trend, kwargs=parameters)
+        thread = threading.Thread(target=index.intraday_trend, kwargs=index_parameters)
         threads.append(thread)
 
     for thread in threads:

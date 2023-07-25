@@ -2942,6 +2942,8 @@ class Index:
                 orderbook = fetch_orderbook_if_needed(
                     shared_data, refresh_needed=refresh_orderbook
                 )
+                if shared_data is None:
+                    sleep(3)
                 orders_triggered, orders_complete = process_stop_loss_order_statuses(
                     orderbook,
                     stop_loss_order_ids,
@@ -4231,7 +4233,7 @@ def fetch_lot_size(name, expiry=None):
     lot_sizes = filtered_df.lotsize.values
 
     if len(set(lot_sizes)) > 1:
-        print(
+        logger.info(
             f"Multiple lot sizes found for {name}. Using the closest expiry lot size."
         )
         filtered_df = filtered_df.sort_values("expiry_dt")

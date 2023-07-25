@@ -865,6 +865,7 @@ def backtest_intraday_trend(
     open_nth=0,
     beta=1,
     trend_threshold=1,
+    stop_loss=0.3,
     max_entries=3,
     eod_client=None,
     rolling_days=60,
@@ -914,6 +915,23 @@ def backtest_intraday_trend(
         1 - open_data["threshold_movement"] / 100
     )
     open_data["day_close"] = one_min_df.groupby(one_min_df["date"].dt.date).close.last()
+
+    daily_minute_vols = (
+        one_min_df.groupby(one_min_df["date"].dt.date)
+        .apply(lambda x: x["close"].pct_change().abs().mean() * 100)
+    )
+
+    daily_minute_vols_rolling = daily_minute_vols.rolling(rolling_days, min_periods=1).mean()
+
+    daily_open_to_close_trends = (
+        one_min_df.close.groupby(one_min_df["date"].dt.date)
+        .apply(lambda x: (x.iloc[-1] / x.iloc[0] - 1) * 100)
+    )
+
+    daily_open_to_close_trends_rolling = daily_open_to_close_trends.abs().rolling(rolling_days, min_periods=1).mean()
+
+    rolling_ratio = daily_open_to_close_trends_rolling / daily_minute_vols_rolling
+
     open_data.columns = [
         "day_open",
         "open_vix",
@@ -937,6 +955,9 @@ def backtest_intraday_trend(
     ) * 100
 
     def calculate_daily_trade_data(group):
+
+        """ The group is a dataframe """
+
         all_entries_in_a_day = {}
         # Find the first index where the absolute price change crosses the threshold
         entry = 1
@@ -961,7 +982,20 @@ def backtest_intraday_trend(
                 direction = np.sign(group.loc[idx, "change_from_open"])
 
                 # Calculate the stoploss price
-                stoploss_price = cross_price * (1 - 0.003 * direction)
+                if stop_loss == 'dynamic':
+                    # Selecting previous days rolling ratio
+                    current_rolling_ratio = rolling_ratio.loc[:cross_time.date()].iloc[-1]
+                    # Calculating the stop_loss pct
+                    if current_rolling_ratio > 30:
+                        stop_loss_pct = 0.3
+                    elif current_rolling_ratio < 10:
+                        stop_loss_pct = 0.5
+                    else:
+                        stop_loss_pct = ((30 - current_rolling_ratio) / 100) + 0.3
+                else:
+                    stop_loss_pct = stop_loss
+
+                stoploss_price = cross_price * (1 - (stop_loss_pct / 100) * direction)
                 result_dict.update(
                     {
                         "trigger_time": cross_time,
@@ -975,7 +1009,7 @@ def backtest_intraday_trend(
                 if (direction == 1 and future_prices.min() <= stoploss_price) or (
                     direction == -1 and future_prices.max() >= stoploss_price
                 ):  # Stop loss was breached
-                    result_dict["returns"] = -0.30
+                    result_dict["returns"] = -stop_loss_pct
                     stoploss_time_idx = (
                         future_prices[
                             future_prices <= stoploss_price
@@ -1025,32 +1059,18 @@ def backtest_intraday_trend(
     )
 
     # calculating the minute vol
-    merged["minute_vol"] = (
-        one_min_df.groupby(one_min_df["date"].dt.date)
-        .apply(lambda x: x["close"].pct_change().abs().mean() * 100)
-        .to_frame()
-    )
+    merged["minute_vol"] = daily_minute_vols
 
     # calculating the open to close trend
-    merged["open_to_close_trend"] = (
-        one_min_df.close.groupby(one_min_df["date"].dt.date)
-        .apply(lambda x: (x.iloc[-1] / x.iloc[0] - 1) * 100)
-        .abs()
-        .to_frame()
-    )
+    merged["open_to_close_trend"] = daily_open_to_close_trends
+
+    merged["open_to_close_trend_abs"] = merged["open_to_close_trend"].abs()
 
     # calculating the ratio and rolling mean
-    rolling_days = rolling_days
-    merged["minute_vol_rolling"] = (
-        merged["minute_vol"].rolling(rolling_days, min_periods=1).mean()
-    )
-    merged["open_to_close_trend_rolling"] = (
-        merged["open_to_close_trend"].rolling(rolling_days, min_periods=1).mean()
-    )
-    merged["ratio"] = merged["open_to_close_trend"] / merged["minute_vol"]
-    merged["rolling_ratio"] = (
-        merged["open_to_close_trend_rolling"] / merged["minute_vol_rolling"]
-    )
+    merged["minute_vol_rolling"] = daily_minute_vols_rolling
+    merged["open_to_close_trend_rolling"] = daily_open_to_close_trends_rolling
+    merged["ratio"] = merged["open_to_close_trend_abs"] / merged["minute_vol"]
+    merged["rolling_ratio"] = rolling_ratio
 
     return merged
 
