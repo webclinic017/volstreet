@@ -907,24 +907,23 @@ class Index:
         self.available_strikes = None
         self.available_straddle_strikes = None
         self.intraday_straddle_forced_exit = False
+        self.base = get_base(self.name)
 
         if self.name == "BANKNIFTY":
-            self.base = 100
             self.exchange_type = 1
         elif self.name == "NIFTY":
-            self.base = 50
             self.exchange_type = 1
         elif self.name in [
             "FINNIFTY",
             "MIDCPNIFTY",
         ]:  # Finnifty and Midcpnifty temp fix
-            self.base = 50
             self.exchange_type = 2
         else:
-            self.base = get_base(self.name)
             self.exchange_type = 1
-            logger.info(f"Base for {self.name} is {self.base}")
-            # print(f"Base for {self.name} is {self.base}")
+
+        logger.info(
+            f"Initialized {self.name} with lot size {self.lot_size}, base {self.base} and freeze qty {self.freeze_qty}"
+        )
 
         if websocket:
             try:
@@ -2662,7 +2661,7 @@ class Index:
                     info_dict["total_avg_price"] - hedge_total_ltp - self.base
                 )
 
-                logging.info(
+                logger.info(
                     f"{self.name} CTB threshold: {profit_threshold}, Hedge working: {hedge_profit}"
                 )
 
@@ -2752,7 +2751,7 @@ class Index:
                             info_dict["ctb_hedge"] = ctb_hedge
                             ctb_notification_sent = True
                     except Exception as _e:
-                        logging.info(f"Error in process_ctb: {_e}")
+                        logger.error(f"Error in process_ctb: {_e}")
 
                 message = (
                     f"\nUnderlying: {self.name}\n"
@@ -3272,10 +3271,7 @@ class Index:
                 self.webhook_url,
                 return_avg_price=False,
             )
-            if (
-                shared_info_dict["call_stop_loss_order_ids"]
-                and shared_info_dict["put_stop_loss_order_ids"]
-            ):
+            if place_sl_orders:
                 cancel_pending_orders(
                     shared_info_dict["call_stop_loss_order_ids"]
                     + shared_info_dict["put_stop_loss_order_ids"]
@@ -3287,8 +3283,7 @@ class Index:
         call_sl = shared_info_dict["call_sl"]
         put_sl = shared_info_dict["put_sl"]
 
-        if not call_sl and not put_sl:
-            # Both stop losses not hit
+        if not call_sl and not put_sl:  # Both stop losses not hit
             if shared_info_dict["time_left_day_start"] * 365 < 1:  # expiry day
                 call_exit_avg_price, put_exit_avg_price = (
                     shared_info_dict["call_ltp"],
@@ -3303,6 +3298,12 @@ class Index:
                     order_tag,
                     self.webhook_url,
                     return_avg_price=True,
+                )
+            # noinspection PyTypeChecker
+            if place_sl_orders and not shared_info_dict["exit_triggers"]["convert_to_butterfly"]:
+                cancel_pending_orders(
+                    shared_info_dict["call_stop_loss_order_ids"]
+                    + shared_info_dict["put_stop_loss_order_ids"]
                 )
             shared_info_dict["call_exit_price"] = call_exit_avg_price
             shared_info_dict["put_exit_price"] = put_exit_avg_price
@@ -3321,6 +3322,8 @@ class Index:
                     order_tag,
                     self.webhook_url,
                 )
+            if place_sl_orders:
+                cancel_pending_orders(shared_info_dict[f"{exit_option_type}_stop_loss_order_ids"])
             shared_info_dict[f"{exit_option_type}_exit_price"] = non_sl_exit_price
 
         else:  # Both stop losses hit
@@ -4251,6 +4254,9 @@ def get_base(name):
     strike_array = (
         strike_array.loc[strike_array.expiry_dt == closest_expiry]["strike"] / 100
     )
+    upper_bound = np.percentile(strike_array, 90)
+    lower_bound = np.percentile(strike_array, 30)
+    strike_array = strike_array[strike_array.between(lower_bound, upper_bound, inclusive='both')]
     strike_differences = np.diff(strike_array.sort_values().unique())
     values, counts = np.unique(strike_differences, return_counts=True)
     mode = values[np.argmax(counts)]
