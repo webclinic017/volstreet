@@ -862,13 +862,14 @@ def get_constituent_1m_data(kite_object, index_name, path="C:\\Users\\Administra
 
 def backtest_intraday_trend(
     one_min_df,
+    vix_df,
     open_nth=0,
     beta=1,
     trend_threshold=1,
     stop_loss=0.3,
     max_entries=3,
-    eod_client=None,
     rolling_days=60,
+    randomize=False,
 ):
     one_min_df = one_min_df.copy()
     if one_min_df.index.name == "date":
@@ -886,14 +887,7 @@ def backtest_intraday_trend(
         datetime(2020, 11, 14).date(),
     ]
 
-    # Fetching vix data and calculating beta
-    if eod_client is None:
-        client = DataClient(api_key=__import__("os").environ.get("EOD_API_KEY"))
-    else:
-        client = eod_client
-
-    vix = client.get_data("VIX", return_columns=["open", "close"])
-    vix = vix.resample("B").ffill()
+    vix = vix_df.copy()
     vix["open"] = vix["open"] * beta
     vix["close"] = vix["close"] * beta
 
@@ -907,6 +901,10 @@ def backtest_intraday_trend(
     open_data = open_prices.merge(
         vix["open"].to_frame(), left_index=True, right_index=True, suffixes=("", "_vix")
     )
+
+    if randomize:
+        trend_threshold = 0.0001
+
     open_data["threshold_movement"] = (open_data["open_vix"] / 48) * trend_threshold
     open_data["upper_bound"] = open_data["open"] * (
         1 + open_data["threshold_movement"] / 100
@@ -924,7 +922,7 @@ def backtest_intraday_trend(
     daily_minute_vols_rolling = daily_minute_vols.rolling(rolling_days, min_periods=1).mean()
 
     daily_open_to_close_trends = (
-        one_min_df.close.groupby(one_min_df["date"].dt.date)
+        one_min_df.open.groupby(one_min_df["date"].dt.date)
         .apply(lambda x: (x.iloc[-1] / x.iloc[0] - 1) * 100)
     )
 
@@ -962,6 +960,8 @@ def backtest_intraday_trend(
         # Find the first index where the absolute price change crosses the threshold
         entry = 1
         while entry <= max_entries:
+            # Filtering the dataframe to only include the rows after open nth
+            group = group.iloc[open_nth:]
             idx = group[
                 abs(group["change_from_open"]) >= group["threshold_movement"]
             ].first_valid_index()
@@ -979,7 +979,10 @@ def backtest_intraday_trend(
                 cross_time = group.loc[idx, "date"]
 
                 # Determine the direction of the movement
-                direction = np.sign(group.loc[idx, "change_from_open"])
+                if randomize:
+                    direction = np.random.choice([-1, 1])
+                else:
+                    direction = np.sign(group.loc[idx, "change_from_open"])
 
                 # Calculate the stoploss price
                 if stop_loss == 'dynamic':

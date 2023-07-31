@@ -84,7 +84,9 @@ def intraday_options_on_indices(
     fin = vs.Index("FINNIFTY", webhook_url=discord_webhook_url)
     midcap = vs.Index("MIDCPNIFTY", webhook_url=discord_webhook_url)
 
-    indices = vs.get_strangle_indices_to_trade(nifty, bnf, fin, midcap, safe_indices=safe_indices)
+    indices = vs.get_strangle_indices_to_trade(
+        nifty, bnf, fin, midcap, safe_indices=safe_indices
+    )
 
     parameters["quantity_in_lots"] = parameters["quantity_in_lots"] // len(indices)
 
@@ -246,6 +248,13 @@ def intraday_trend_on_indices(
 
     for thread in threads:
         thread.join()
+
+    # Call the data appender function on the traded indices
+    for index in indices:
+        vs.append_data_to_json(
+            index.strategy_log["Intraday trend"],
+            f"{user}_{index.name}_intraday_trend.json",
+        )
 
 
 def index_vs_constituents(

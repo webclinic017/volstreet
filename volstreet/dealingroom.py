@@ -908,6 +908,7 @@ class Index:
         self.available_straddle_strikes = None
         self.intraday_straddle_forced_exit = False
         self.base = get_base(self.name)
+        self.strategy_log = defaultdict(list)
 
         if self.name == "BANKNIFTY":
             self.exchange_type = 1
@@ -3300,7 +3301,10 @@ class Index:
                     return_avg_price=True,
                 )
             # noinspection PyTypeChecker
-            if place_sl_orders and not shared_info_dict["exit_triggers"]["convert_to_butterfly"]:
+            if (
+                place_sl_orders
+                and not shared_info_dict["exit_triggers"]["convert_to_butterfly"]
+            ):
                 cancel_pending_orders(
                     shared_info_dict["call_stop_loss_order_ids"]
                     + shared_info_dict["put_stop_loss_order_ids"]
@@ -3323,7 +3327,9 @@ class Index:
                     self.webhook_url,
                 )
             if place_sl_orders:
-                cancel_pending_orders(shared_info_dict[f"{exit_option_type}_stop_loss_order_ids"])
+                cancel_pending_orders(
+                    shared_info_dict[f"{exit_option_type}_stop_loss_order_ids"]
+                )
             shared_info_dict[f"{exit_option_type}_exit_price"] = non_sl_exit_price
 
         else:  # Both stop losses hit
@@ -3379,8 +3385,9 @@ class Index:
         beta=0.8,
         max_entries=3,
     ):
+        strategy_tag = "Intraday trend"
+
         while currenttime().time() < time(*start_time):
-            print(f"{self.name} trender sleeping till {start_time}")
             sleep(1)
 
         open_price = self.fetch_ltp()
@@ -3410,6 +3417,7 @@ class Index:
         entries = 0
         last_print_time = currenttime()
         movement = 0
+        entries_log = []
         while entries < max_entries and currenttime().time() < exit_time:
             # Scan for entry condition
             notifier(
@@ -3452,14 +3460,38 @@ class Index:
                 f"Stop loss at {stop_loss_price}.",
                 self.webhook_url,
             )
-            place_option_order_and_notify(
+            call_entry_price, put_entry_price = place_option_order_and_notify(
                 atm_synthetic_fut,
                 position,
                 quantity_in_lots,
                 "LIMIT",
-                f"{self.name} trender",
+                strategy_tag,
+                self.webhook_url,
+                return_avg_price=True,
+            )
+
+            if call_entry_price == 0 or put_entry_price == 0:
+                call_entry_price, put_entry_price = atm_synthetic_fut.fetch_ltp()
+
+            entry_price = price + call_entry_price - put_entry_price
+            spot_future_basis = entry_price - price
+
+            notifier(
+                f"{self.name} trender {entries+1} entry price: {entry_price}, "
+                f"spot-future basis: {spot_future_basis}",
                 self.webhook_url,
             )
+
+            trade_info = {
+                "Entry time": currenttime().strftime("%d-%m-%Y %H:%M:%S"),
+                "Position": position,
+                "Spot price": price,
+                "Entry price": entry_price,
+                "Spot-future basis": spot_future_basis,
+                "Stop loss": stop_loss_price,
+                "Threshold movement": threshold_movement,
+                "Movement": movement,
+            }
 
             # Tracking position
             while currenttime().time() < exit_time and not stop_loss_hit:
@@ -3476,20 +3508,52 @@ class Index:
                 sleep(sleep_time)
 
             # Exit condition met exiting position (stop loss or time)
+            price = self.fetch_ltp()
             stop_loss_message = f"Trender stop loss hit. " if stop_loss_hit else ""
             notifier(
-                f"{stop_loss_message}{self.name} trender {entries+1} exiting. {self.name} at {self.fetch_ltp()}.",
+                f"{stop_loss_message}{self.name} trender {entries+1} exiting. {self.name} at {price}.",
                 self.webhook_url,
             )
-            place_option_order_and_notify(
+            call_exit_price, put_exit_price = place_option_order_and_notify(
                 atm_synthetic_fut,
                 "BUY" if position == "SELL" else "SELL",
                 quantity_in_lots,
                 "LIMIT",
-                f"{self.name} trender",
+                strategy_tag,
                 self.webhook_url,
             )
+
+            if call_exit_price == 0 or put_exit_price == 0:
+                call_exit_price, put_exit_price = atm_synthetic_fut.fetch_ltp()
+
+            exit_price = self.fetch_ltp() + call_exit_price - put_exit_price
+            pnl = (
+                (exit_price - entry_price)
+                if position == "BUY"
+                else (entry_price - exit_price)
+            )
+            spot_future_basis = exit_price - price
+
+            notifier(
+                f"{self.name} trender {entries+1} exit price: {exit_price}, "
+                f"spot-future basis: {spot_future_basis}, pnl: {pnl}",
+                self.webhook_url,
+            )
+
+            trade_info.update(
+                {
+                    "Exit time": currenttime().strftime("%d-%m-%Y %H:%M:%S"),
+                    "Stop loss hit": stop_loss_hit,
+                    "Spot exit price": price,
+                    "Exit price": exit_price,
+                    "Spot-future basis": spot_future_basis,
+                    "PnL": pnl,
+                }
+            )
+            entries_log.append(trade_info)
             entries += 1
+
+        self.strategy_log[strategy_tag].extend(entries_log)
 
     def intraday_straddle_delta_hedged(
         self,
@@ -3837,7 +3901,9 @@ def fetch_book(book):
         raise ValueError(f"Invalid book type '{book}'.")
 
 
-def lookup_and_return(book, field_to_lookup, value_to_lookup, field_to_return):
+def lookup_and_return(
+    book, field_to_lookup, value_to_lookup, field_to_return
+) -> np.array:
     def filter_and_return(data: list):
         if not isinstance(field_to_lookup, list):
             field_to_lookup_ = [field_to_lookup]
@@ -3861,7 +3927,7 @@ def lookup_and_return(book, field_to_lookup, value_to_lookup, field_to_return):
         ]
 
         if len(bucket) == 0:
-            return 0
+            return np.array([])
         else:
             return np.array(bucket)
 
@@ -4038,7 +4104,7 @@ def process_stop_loss_order_statuses(
 
     statuses = lookup_and_return(order_book, "orderid", order_ids, "status")
 
-    if isinstance(statuses, (int, np.int32, np.int64)):
+    if not isinstance(statuses, np.ndarray) or statuses.size == 0:
         logger.error(f"Statuses is {statuses} for orderid(s) {order_ids}")
 
     if all(statuses == pending_text):
@@ -4256,7 +4322,9 @@ def get_base(name):
     )
     upper_bound = np.percentile(strike_array, 90)
     lower_bound = np.percentile(strike_array, 30)
-    strike_array = strike_array[strike_array.between(lower_bound, upper_bound, inclusive='both')]
+    strike_array = strike_array[
+        strike_array.between(lower_bound, upper_bound, inclusive="both")
+    ]
     strike_differences = np.diff(strike_array.sort_values().unique())
     values, counts = np.unique(strike_differences, return_counts=True)
     mode = values[np.argmax(counts)]
