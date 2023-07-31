@@ -3473,7 +3473,7 @@ class Index:
             if call_entry_price == 0 or put_entry_price == 0:
                 call_entry_price, put_entry_price = atm_synthetic_fut.fetch_ltp()
 
-            entry_price = price + call_entry_price - put_entry_price
+            entry_price = atm_strike + call_entry_price - put_entry_price
             spot_future_basis = entry_price - price
 
             notifier(
@@ -3526,7 +3526,7 @@ class Index:
             if call_exit_price == 0 or put_exit_price == 0:
                 call_exit_price, put_exit_price = atm_synthetic_fut.fetch_ltp()
 
-            exit_price = self.fetch_ltp() + call_exit_price - put_exit_price
+            exit_price = atm_strike + call_exit_price - put_exit_price
             pnl = (
                 (exit_price - entry_price)
                 if position == "BUY"
