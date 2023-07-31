@@ -3746,24 +3746,33 @@ def convert_to_serializable(data):
         return data
 
 
-def append_data_to_json(data_dict: defaultdict, file_name: str):
+def append_data_to_json(new_data: defaultdict | dict | list, file_name: str) -> None:
     # Attempt to read the existing data from the JSON file
     try:
         with open(file_name, "r") as file:
-            data = json.load(file)
+            existing_data = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
         # If the file doesn't exist or has invalid JSON content, create an empty list and write it to the file
-        data = []
+        existing_data = []
         with open(file_name, "w") as file:
-            json.dump(data, file)
+            json.dump(existing_data, file)
 
     # Convert the defaultdict to a regular dict, make it JSON serializable, and append it to the list
-    serializable_data = convert_to_serializable(dict(data_dict))
-    data.append(serializable_data)
+
+    if isinstance(new_data, (defaultdict, dict)):
+        if isinstance(new_data, defaultdict):
+            new_data = dict(new_data)
+        serialized_data = convert_to_serializable(new_data)
+        existing_data.append(serialized_data)
+    elif isinstance(new_data, list):
+        serialized_data = convert_to_serializable(new_data)
+        existing_data.extend(serialized_data)
+    else:
+        raise TypeError("New data must be a defaultdict, dict, or list.")
 
     # Write the updated data back to the JSON file with indentation
     with open(file_name, "w") as file:
-        json.dump(data, file, indent=4, default=str)
+        json.dump(existing_data, file, indent=4, default=str)
 
 
 def word_to_num(s):
