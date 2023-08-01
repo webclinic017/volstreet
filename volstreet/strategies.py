@@ -134,9 +134,17 @@ def intraday_options_on_indices(
 
     # Call the data appender function on the traded indices
     for index in indices:
-        vs.append_data_to_json(
-            index.order_log, f"{user}_{index.name}_{strategy}_log.json"
-        )
+        try:
+            vs.append_data_to_json(
+                index.strategy_log["Intraday strangle"],
+                f"{user}_{index.name}_intraday_strangle.json",
+            )
+        except Exception as e:
+            vs.notifier(
+                f"Appending intraday strangle data failed: {e}"
+                f"\nStrategy log: {index.strategy_log['Intraday strangle']}",
+                discord_webhook_url,
+            )
 
 
 def overnight_straddle_nifty(
@@ -251,10 +259,17 @@ def intraday_trend_on_indices(
 
     # Call the data appender function on the traded indices
     for index in indices:
-        vs.append_data_to_json(
-            index.strategy_log["Intraday trend"],
-            f"{user}_{index.name}_intraday_trend.json",
-        )
+        try:
+            vs.append_data_to_json(
+                index.strategy_log["Intraday trend"],
+                f"{user}_{index.name}_intraday_trend.json",
+            )
+        except Exception as e:
+            vs.notifier(
+                f"Appending intraday trend data failed: {e}"
+                f"\nStrategy log: {index.strategy_log['Intraday trend']}",
+                discord_webhook_url,
+            )
 
 
 def index_vs_constituents(

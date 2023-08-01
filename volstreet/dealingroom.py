@@ -3080,7 +3080,7 @@ class Index:
         # Entering the main function
 
         # Setting strikes and expiry
-        order_tag = "Intraday Strangle"
+        order_tag = "Intraday strangle"
         underlying_ltp = self.fetch_ltp()
         temp_call_strike = underlying_ltp * (1 + call_strike_offset)
         temp_put_strike = underlying_ltp * (1 - put_strike_offset)
@@ -3146,7 +3146,7 @@ class Index:
         )
 
         # Logging information and sending notification
-        self.log_combined_order(
+        trade_log = dict(
             call_strike=strangle.call_strike,
             put_strike=strangle.put_strike,
             expiry=expiry,
@@ -3156,9 +3156,7 @@ class Index:
             order_tag=order_tag,
         )
 
-        summary_message = "\n".join(
-            f"{k}: {v}" for k, v in self.order_log[order_tag][-1].items()
-        )
+        summary_message = "\n".join(f"{k}: {v}" for k, v in trade_log.items())
 
         traded_call_iv, traded_put_iv, traded_avg_iv = strangle_iv(
             callprice=call_avg_price,
@@ -3361,16 +3359,14 @@ class Index:
             "Call SL": shared_info_dict["call_sl"],
             "Put SL": shared_info_dict["put_sl"],
         }
-        try:
-            self.order_log[order_tag][0].update(exit_dict)
-        except Exception as e:
-            notifier(
-                f"{self.name}: Error updating order list with exit details. {e}",
-                self.webhook_url,
-            )
+
         notifier(exit_message, self.webhook_url)
         shared_info_dict["trade_complete"] = True
         position_monitor_thread.join()
+
+        trade_log.update(exit_dict)
+        self.strategy_log[order_tag].append(trade_log)
+
         return shared_info_dict
 
     @log_errors
