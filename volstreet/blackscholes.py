@@ -1,6 +1,18 @@
 from scipy.stats import norm
 from scipy.optimize import brentq
 import numpy as np
+import logging
+from datetime import datetime
+from volstreet.exceptions import OptionModelInputError
+
+bs_logger = logging.getLogger(__name__)
+today = datetime.now().strftime("%Y-%m-%d")
+file_handler = logging.FileHandler(f"bs-{today}.log")
+formatter = logging.Formatter("%(asctime)s : %(levelname)s : %(name)s : %(message)s")
+file_handler.setFormatter(formatter)
+file_handler.setLevel(logging.INFO)
+bs_logger.setLevel(logging.INFO)
+bs_logger.addHandler(file_handler)
 
 N = norm.cdf
 binary_flag = {"c": 1, "p": -1}
@@ -97,12 +109,18 @@ def implied_volatility(price, S, K, t, r, flag):
     else:
         f = lambda sigma: price - call(S, K, t, r, sigma)
 
-    return brentq(
-        f, a=1e-12, b=100, xtol=1e-15, rtol=1e-15, maxiter=1000, full_output=False
-    )
+    try:
+        return brentq(
+            f, a=1e-12, b=100, xtol=1e-15, rtol=1e-15, maxiter=1000, full_output=False
+        )
+    except Exception as e:
+        bs_logger.error(
+            f"Error in implied_volatility: {e}, price={price}, S={S}, K={K}, t={t}, r={r}, flag={flag}"
+        )
+        raise e
 
 
-def main():
+def test_func():
     # Comparing time to calculate implied volatility using two different methods
     import timeit
 
@@ -268,6 +286,11 @@ def target_movement(
     :return:
     """
     flag = flag.lower()[0]
+    strike_diff = current_spot - strike if flag == "c" else strike - current_spot
+    if strike_diff > current_price:
+        raise OptionModelInputError(
+            f"Current price {current_price} of {'call' if flag == 'c' else 'put'} is less than the strike difference"
+        )
     price_func = call if flag == "c" else put
     vol = implied_volatility(current_price, current_spot, strike, timeleft, 0.06, flag)
     delta_ = delta(current_spot, strike, timeleft, 0.06, vol, flag)

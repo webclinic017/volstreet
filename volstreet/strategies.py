@@ -259,7 +259,13 @@ def intraday_trend_on_indices(
 
     # Call the data appender function on the traded indices
     for index in indices:
-        try:
+        try:  # Remove this try except block after testing
+            vs.notifier(
+                f"Appending intraday trend data for {index.name}"
+                f" to {user}_{index.name}_intraday_trend.json"
+                f"\nStrategy log: {index.strategy_log['Intraday trend']}",
+                discord_webhook_url,
+            )
             vs.append_data_to_json(
                 index.strategy_log["Intraday trend"],
                 f"{user}_{index.name}_intraday_trend.json",

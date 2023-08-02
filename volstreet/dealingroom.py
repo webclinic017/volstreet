@@ -11,6 +11,7 @@ from threading import Thread
 from volstreet.SmartWebSocketV2 import SmartWebSocketV2
 from volstreet.constants import scrips, holidays, symbol_df, logger
 from volstreet import blackscholes as bs, datamodule as dm
+from volstreet.exceptions import OptionModelInputError
 from collections import defaultdict, deque
 import yfinance as yf
 from fuzzywuzzy import process
@@ -1280,6 +1281,8 @@ class Index:
                 + f"{strike_info} {expiry} {quantity_in_lots} lot(s). You can modify the orders.",
                 self.webhook_url,
             )
+            if return_avg_price:
+                return call_price, put_price
         elif any(call_order_statuses == "rejected") or any(
             put_order_statuses == "rejected"
         ):
@@ -1288,6 +1291,8 @@ class Index:
                 + f"{strike_info} {expiry} {quantity_in_lots} lot(s). You can place the rejected orders again.",
                 self.webhook_url,
             )
+            if return_avg_price:
+                return call_price, put_price
         else:
             notifier(
                 f"{order_prefix}ERROR. Order statuses uncertain for {buy_or_sell} {self.name} "
@@ -2892,21 +2897,33 @@ class Index:
             time_left_now = timetoexpiry(expiry)
             time_delta = (time_left_day_start - time_left_now) * 525600
             time_delta = int(time_delta)
-            estimated_movement = bs.target_movement(
-                side,
-                info_dict.get(f"{side}_avg_price"),
-                info_dict.get(f"{side}_stop_loss_price"),
-                entry_spot,
-                info_dict.get("traded_strangle").call_strike
-                if side == "call"
-                else info_dict.get("traded_strangle").put_strike,
-                time_left_day_start,
-                time_delta,
-            )
+            try:
+                estimated_movement = bs.target_movement(
+                    side,
+                    info_dict.get(f"{side}_avg_price"),
+                    info_dict.get(f"{side}_stop_loss_price"),
+                    entry_spot,
+                    info_dict.get("traded_strangle").call_strike
+                    if side == "call"
+                    else info_dict.get("traded_strangle").put_strike,
+                    time_left_day_start,
+                    time_delta,
+                )
+            except OptionModelInputError:
+                estimated_movement = (
+                    0.0015 if side == "call" else -0.0015
+                )  # Remove hard coded number
+                input_error_message = (
+                    f"OptionModelInputError in justify_stop_loss for {self.name} {side} strangle. "
+                    f"Setting estimated_movement to {estimated_movement}"
+                )
+                logger.error(input_error_message)
+                notifier(input_error_message, self.webhook_url)
+
             actual_movement = (current_spot - entry_spot) / entry_spot
             difference_in_sign = np.sign(estimated_movement) != np.sign(actual_movement)
             lack_of_movement = abs(actual_movement) < 0.8 * abs(estimated_movement)
-            # 0.8 above is a magic number TODO: Remove magic number and find a better way to check for lack of movement
+            # Remove hard coded number.
             if difference_in_sign or lack_of_movement:
                 if not info_dict.get(f"{side}_sl_check_notification_sent"):
                     message = (
@@ -5033,6 +5050,43 @@ def place_synthetic_fut_order(
         buy_or_sell, quantity_in_lots, prices, stop_loss_order, order_tag
     )
     return call_order_ids, put_order_ids
+
+
+def handle_open_orders(*order_ids, modify_percentage=0.01, stage=0):
+    """Modifies orders if they are pending by the provided modification percentage"""
+
+    if stage >= 10:
+        return None
+
+    stage_increment = int(modify_percentage * 100)
+    stage_increment = max(stage_increment, 1)
+
+    order_book = fetch_book("orderbook")
+    statuses = lookup_and_return(order_book, "orderid", order_ids, "status")
+    if all(statuses == "complete"):
+        return None
+    elif any(np.isin(statuses, ["rejected", "cancelled"])):
+        return None
+    elif any(statuses == "open"):
+        open_order_ids = [
+            order_id
+            for order_id, status in zip(order_ids, statuses)
+            if status == "open"
+        ]
+        for order_id in open_order_ids:
+            old_price = lookup_and_return(order_book, "orderid", order_id, "price")
+            new_price = old_price * (1 - modify_percentage)
+            modify_params = {"orderid": order_id, "price": new_price}
+            obj.modifyOrder(modify_params)
+
+        order_book = fetch_book("orderbook")
+        statuses = lookup_and_return(order_book, "orderid", open_order_ids, "status")
+        if any(statuses == "open"):
+            return handle_open_orders(
+                *open_order_ids,
+                modify_percentage=modify_percentage,
+                stage=stage + stage_increment,
+            )
 
 
 def cancel_pending_orders(order_ids, variety="STOPLOSS"):
