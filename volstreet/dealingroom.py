@@ -3163,15 +3163,18 @@ class Index:
         )
 
         # Logging information and sending notification
-        trade_log = dict(
-            call_strike=strangle.call_strike,
-            put_strike=strangle.put_strike,
-            expiry=expiry,
-            buy_or_sell="SELL",
-            call_price=call_avg_price,
-            put_price=put_avg_price,
-            order_tag=order_tag,
-        )
+        trade_log = {
+            "Time": currenttime().strftime("%d-%m-%Y %H:%M:%S"),
+            "Index": self.name,
+            "Call strike": strangle.call_strike,
+            "Put strike": strangle.put_strike,
+            "Expiry": expiry,
+            "Action": "SELL",
+            "Call price": call_avg_price,
+            "Put price": put_avg_price,
+            "Total price": total_avg_price,
+            "Order tag": order_tag,
+        }
 
         summary_message = "\n".join(f"{k}: {v}" for k, v in trade_log.items())
 
@@ -3373,8 +3376,8 @@ class Index:
             "Put exit price": shared_info_dict["put_exit_price"],
             "Total exit price": total_exit_price,
             "Points captured": total_avg_price - total_exit_price,
-            "Call SL": shared_info_dict["call_sl"],
-            "Put SL": shared_info_dict["put_sl"],
+            "Call stop loss": shared_info_dict["call_sl"],
+            "Put stop loss": shared_info_dict["put_sl"],
         }
 
         notifier(exit_message, self.webhook_url)
@@ -3927,31 +3930,55 @@ def lookup_and_return(
     book, field_to_lookup, value_to_lookup, field_to_return
 ) -> np.array:
     def filter_and_return(data: list):
-        if not isinstance(field_to_lookup, list):
+        if not isinstance(field_to_lookup, (list, tuple, np.ndarray)):
             field_to_lookup_ = [field_to_lookup]
             value_to_lookup_ = [value_to_lookup]
         else:
             field_to_lookup_ = field_to_lookup
             value_to_lookup_ = value_to_lookup
 
-        bucket = [
-            entry[field_to_return]
-            for entry in data
-            if all(
-                (
-                    entry[field] == value
-                    if not isinstance(value, list)
-                    else entry[field] in value
-                )
-                for field, value in zip(field_to_lookup_, value_to_lookup_)
-            )
-            and all(entry[field] != "" for field in field_to_lookup_)
-        ]
+        if isinstance(
+            field_to_return, (list, tuple, np.ndarray)
+        ):  # Return a dict as multiple fields are requested
+            bucket = {field: [] for field in field_to_return}
+            for entry in data:
+                if all(
+                    (
+                        entry[field] == value
+                        if not isinstance(value, (list, tuple, np.ndarray))
+                        else entry[field] in value
+                    )
+                    for field, value in zip(field_to_lookup_, value_to_lookup_)
+                ) and all(entry[field] != "" for field in field_to_lookup_):
+                    for field in field_to_return:
+                        bucket[field].append(entry[field])
 
-        if len(bucket) == 0:
-            return np.array([])
-        else:
-            return np.array(bucket)
+            if all(len(v) == 0 for v in bucket.values()):
+                return {}
+            else:
+                # Flatten the dictionary if all fields contain only one value
+                if all(len(v) == 1 for v in bucket.values()):
+                    bucket = {k: v[0] for k, v in bucket.items()}
+                return bucket
+        else:  # Return a numpy array as only one field is requested
+            bucket = [
+                entry[field_to_return]
+                for entry in data
+                if all(
+                    (
+                        entry[field] == value
+                        if not isinstance(value, (list, tuple, np.ndarray))
+                        else entry[field] in value
+                    )
+                    for field, value in zip(field_to_lookup_, value_to_lookup_)
+                )
+                and all(entry[field] != "" for field in field_to_lookup_)
+            ]
+
+            if len(bucket) == 0:
+                return np.array([])
+            else:
+                return np.array(bucket)
 
     if not (
         isinstance(field_to_lookup, (str, list, tuple, np.ndarray))
@@ -5052,41 +5079,97 @@ def place_synthetic_fut_order(
     return call_order_ids, put_order_ids
 
 
-def handle_open_orders(*order_ids, modify_percentage=0.01, stage=0):
+def handle_open_orders(*order_ids, action, modify_percentage=0.01, stage=0):
     """Modifies orders if they are pending by the provided modification percentage"""
+    print(
+        f"\nEntering handle_open_orders with order_ids: {order_ids}, "
+        f"modify_percentage: {modify_percentage}, stage: {stage}"
+    )
 
     if stage >= 10:
+        print("Stage >= 10, exiting function without modifying any orders")
         return None
 
     stage_increment = int(modify_percentage * 100)
     stage_increment = max(stage_increment, 1)
+    print(f"Calculated stage_increment as: {stage_increment}")
 
     order_book = fetch_book("orderbook")
+    sleep(1)
+
     statuses = lookup_and_return(order_book, "orderid", order_ids, "status")
+    print(f"Looked up order statuses: {statuses}")
+
     if all(statuses == "complete"):
+        print("All orders are complete, exiting function without modifying any orders")
         return None
     elif any(np.isin(statuses, ["rejected", "cancelled"])):
+        print(
+            "Some orders are rejected or cancelled, exiting function without modifying any orders"
+        )
         return None
     elif any(statuses == "open"):
+        print("Some orders are open, proceeding with modifications")
+
         open_order_ids = [
             order_id
             for order_id, status in zip(order_ids, statuses)
             if status == "open"
         ]
+        print(f"Open order ids: {open_order_ids}")
+
         for order_id in open_order_ids:
-            old_price = lookup_and_return(order_book, "orderid", order_id, "price")
-            new_price = old_price * (1 - modify_percentage)
-            modify_params = {"orderid": order_id, "price": new_price}
-            obj.modifyOrder(modify_params)
+            relevant_fields = [
+                "orderid",
+                "variety",
+                "symboltoken",
+                "price",
+                "ordertype",
+                "producttype",
+                "exchange",
+                "tradingsymbol",
+                "quantity",
+                "duration",
+            ]
+
+            current_params = lookup_and_return(
+                order_book, "orderid", order_id, relevant_fields
+            )
+            print(f"Current params for order {order_id}: {current_params}")
+
+            old_price = current_params["price"]
+            print(f"Old price for order {order_id}: {old_price}")
+
+            new_price = (
+                old_price * (1 + modify_percentage)
+                if action == "BUY"
+                else old_price * (1 - modify_percentage)
+            )
+            print(f"New price for order {order_id}: {new_price}")
+
+            modified_params = current_params.copy()
+            modified_params["price"] = new_price
+            print(f"Modified params for order {order_id}: {modified_params}")
+
+            obj.modifyOrder(modified_params)
+            print(f"Modified order {order_id} with new price: {new_price}")
 
         order_book = fetch_book("orderbook")
+        sleep(1)
+
         statuses = lookup_and_return(order_book, "orderid", open_order_ids, "status")
+        print(f"Looked up order statuses after modifications: {statuses}")
+
         if any(statuses == "open"):
+            print("Some orders are still open, recalling function with increased stage")
             return handle_open_orders(
                 *open_order_ids,
+                action=action,
                 modify_percentage=modify_percentage,
                 stage=stage + stage_increment,
             )
+
+        print("All orders are now complete or closed, exiting function")
 
 
 def cancel_pending_orders(order_ids, variety="STOPLOSS"):

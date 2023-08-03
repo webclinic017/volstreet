@@ -134,17 +134,11 @@ def intraday_options_on_indices(
 
     # Call the data appender function on the traded indices
     for index in indices:
-        try:
-            vs.append_data_to_json(
-                index.strategy_log["Intraday strangle"],
-                f"{user}_{index.name}_intraday_strangle.json",
-            )
-        except Exception as e:
-            vs.notifier(
-                f"Appending intraday strangle data failed: {e}"
-                f"\nStrategy log: {index.strategy_log['Intraday strangle']}",
-                discord_webhook_url,
-            )
+        vs.append_data_to_json(
+            index.strategy_log["Intraday strangle"],
+            f"{user}_{index.name}_intraday_strangle.json",
+        )
+        vs.notifier(f"Appended data for {index.name} {strategy}.", discord_webhook_url)
 
 
 def overnight_straddle_nifty(
@@ -243,11 +237,12 @@ def intraday_trend_on_indices(
         webhook_url=discord_webhook_url,
     )
 
+    indices = [vs.Index(index) for index in indices]
+
     threads = []
-    for index_symbol in indices:
+    for index in indices:
         index_parameters = parameters.copy()
-        index_parameters.update(special_parameters.get(index_symbol, {}))
-        index = vs.Index(index_symbol, webhook_url=discord_webhook_url)
+        index_parameters.update(special_parameters.get(index.name, {}))
         thread = threading.Thread(target=index.intraday_trend, kwargs=index_parameters)
         threads.append(thread)
 
@@ -260,20 +255,14 @@ def intraday_trend_on_indices(
     # Call the data appender function on the traded indices
     for index in indices:
         try:  # Remove this try except block after testing
-            vs.notifier(
-                f"Appending intraday trend data for {index.name}"
-                f" to {user}_{index.name}_intraday_trend.json"
-                f"\nStrategy log: {index.strategy_log['Intraday trend']}",
-                discord_webhook_url,
-            )
             vs.append_data_to_json(
                 index.strategy_log["Intraday trend"],
                 f"{user}_{index.name}_intraday_trend.json",
             )
+            vs.notifier(f"Appended data for {index.name} intraday trend.", webhook_url)
         except Exception as e:
             vs.notifier(
-                f"Appending intraday trend data failed: {e}"
-                f"\nStrategy log: {index.strategy_log['Intraday trend']}",
+                f"Appending intraday trend data failed for {index.name}: {e}",
                 discord_webhook_url,
             )
 

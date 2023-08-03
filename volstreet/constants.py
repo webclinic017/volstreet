@@ -50,7 +50,9 @@ def create_logger(name):
     today = datetime.now().strftime("%Y-%m-%d")
     info_log_filename = f"error-{today}.log"
     info_handler = logging.FileHandler(info_log_filename)
-    formatter = logging.Formatter("%(asctime)s:%(levelname)s:%(message)s")
+    formatter = logging.Formatter(
+        "%(asctime)s : %(levelname)s : %(name)s : %(message)s"
+    )
     info_handler.setFormatter(formatter)
     info_handler.setLevel(logging.INFO)
     logger.addHandler(info_handler)
