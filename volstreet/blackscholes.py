@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from volstreet.exceptions import OptionModelInputError
 
-bs_logger = logging.getLogger(__name__)
+bs_logger = logging.getLogger("blackscholes")
 today = datetime.now().strftime("%Y-%m-%d")
 file_handler = logging.FileHandler(f"bs-{today}.log")
 formatter = logging.Formatter("%(asctime)s : %(levelname)s : %(name)s : %(message)s")

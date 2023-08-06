@@ -225,6 +225,9 @@ def intraday_trend_on_indices(
         client, user, pin, apikey, authkey, webhook_url
     )
 
+    if special_parameters is None:
+        special_parameters = {}
+
     if vs.currenttime().date() in vs.holidays:
         vs.notifier("Today is a holiday hence exiting.", discord_webhook_url)
         exit()
@@ -237,7 +240,7 @@ def intraday_trend_on_indices(
         webhook_url=discord_webhook_url,
     )
 
-    indices = [vs.Index(index) for index in indices]
+    indices = [vs.Index(index, webhook_url=discord_webhook_url) for index in indices]
 
     threads = []
     for index in indices:
@@ -259,7 +262,9 @@ def intraday_trend_on_indices(
                 index.strategy_log["Intraday trend"],
                 f"{user}_{index.name}_intraday_trend.json",
             )
-            vs.notifier(f"Appended data for {index.name} intraday trend.", webhook_url)
+            vs.notifier(
+                f"Appended data for {index.name} intraday trend.", discord_webhook_url
+            )
         except Exception as e:
             vs.notifier(
                 f"Appending intraday trend data failed for {index.name}: {e}",

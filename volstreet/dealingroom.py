@@ -3135,6 +3135,8 @@ class Index:
             self.webhook_url,
             return_avg_price=True,
         )
+        call_avg_price = call_ltp if np.isnan(call_avg_price) else call_avg_price
+        put_avg_price = put_ltp if np.isnan(put_avg_price) else put_avg_price
         total_avg_price = call_avg_price + put_avg_price
 
         # Setting stop loss
@@ -3961,8 +3963,18 @@ def lookup_and_return(
                     bucket = {k: v[0] for k, v in bucket.items()}
                 return bucket
         else:  # Return a numpy array as only one field is requested
+            # Check if 'orderid' is in field_to_lookup_
+            if "orderid" in field_to_lookup_:
+                sort_by_orderid = True
+                orderid_index = field_to_lookup_.index("orderid")
+            else:
+                sort_by_orderid = False
+                orderid_index = None
+
             bucket = [
-                entry[field_to_return]
+                (entry["orderid"], entry[field_to_return])
+                if sort_by_orderid
+                else entry[field_to_return]
                 for entry in data
                 if all(
                     (
@@ -3978,7 +3990,18 @@ def lookup_and_return(
             if len(bucket) == 0:
                 return np.array([])
             else:
-                return np.array(bucket)
+                if sort_by_orderid:
+                    # Create a dict mapping order ids to their index in value_to_lookup
+                    orderid_to_index = {
+                        value: index
+                        for index, value in enumerate(value_to_lookup_[orderid_index])
+                    }
+                    # Sort the bucket based on the order of 'orderid' in value_to_lookup
+                    bucket.sort(key=lambda x: orderid_to_index[x[0]])
+                    # Return only the field_to_return values
+                    return np.array([x[1] for x in bucket])
+                else:
+                    return np.array(bucket)
 
     if not (
         isinstance(field_to_lookup, (str, list, tuple, np.ndarray))
@@ -5130,6 +5153,7 @@ def handle_open_orders(*order_ids, action, modify_percentage=0.01, stage=0):
                 "tradingsymbol",
                 "quantity",
                 "duration",
+                "status",
             ]
 
             current_params = lookup_and_return(
@@ -5145,11 +5169,13 @@ def handle_open_orders(*order_ids, action, modify_percentage=0.01, stage=0):
                 if action == "BUY"
                 else old_price * (1 - modify_percentage)
             )
+            new_price = custom_round(new_price)
             print(f"New price for order {order_id}: {new_price}")
 
             modified_params = current_params.copy()
             modified_params["price"] = new_price
-            print(f"Modified params for order {order_id}: {modified_params}")
+            modified_params.pop("status")
+            # print(f"Modified params for order {order_id}: {modified_params}")
 
             obj.modifyOrder(modified_params)
             print(f"Modified order {order_id} with new price: {new_price}")
