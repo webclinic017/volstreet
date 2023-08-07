@@ -4,11 +4,11 @@ from datetime import datetime, time, timedelta, timezone
 from time import sleep
 import requests
 import json
-from smartapi import SmartConnect
-from smartapi.smartExceptions import DataException
+from SmartApi import SmartConnect
+from SmartApi.smartExceptions import DataException
 import pyotp
 from threading import Thread
-from volstreet.SmartWebSocketV2 import SmartWebSocketV2
+from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 from volstreet.constants import scrips, holidays, symbol_df, logger
 from volstreet import blackscholes as bs, datamodule as dm
 from volstreet.exceptions import OptionModelInputError
@@ -88,9 +88,12 @@ class PriceFeed(SmartWebSocketV2):
         self.correlation_id = correlation_id
         self.finnifty_index = Index("FINNIFTY")  # Finnifty temp fix
 
-    def start_websocket(self):
+    def start_websocket(self, tokens=None, mode=None, exchange_type=None):
+        def _subscribe_tokens():
+            self.subscribe_tokens(tokens, mode, exchange_type)
+
         def on_open(wsapp):
-            self.subscribe_tokens()
+            _subscribe_tokens()
 
         # Assign the callbacks.
         self.on_open = on_open
@@ -99,10 +102,14 @@ class PriceFeed(SmartWebSocketV2):
         self.on_close = lambda wsapp: print("Close")
         Thread(target=self.connect).start()
 
-    def subscribe_tokens(self):
-        tokens = ["26000", "26009"]
-        mode = 1
-        token_list = [{"exchangeType": 1, "tokens": tokens}]
+    def subscribe_tokens(self, tokens=None, mode=None, exchange_type=None):
+        if tokens is None:
+            tokens = ["26000", "26009"]
+        if mode is None:
+            mode = 1
+        if exchange_type is None:
+            exchange_type = 1
+        token_list = [{"exchangeType": exchange_type, "tokens": tokens}]
         self.subscribe(self.correlation_id, mode, token_list)
 
     def on_data_handler(self, wsapp, message):
