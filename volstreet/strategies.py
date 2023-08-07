@@ -79,16 +79,17 @@ def intraday_options_on_indices(
         authkey=authkey,
         webhook_url=discord_webhook_url,
     )
-    nifty = vs.Index("NIFTY", webhook_url=discord_webhook_url)
-    bnf = vs.Index("BANKNIFTY", webhook_url=discord_webhook_url)
-    fin = vs.Index("FINNIFTY", webhook_url=discord_webhook_url)
-    midcap = vs.Index("MIDCPNIFTY", webhook_url=discord_webhook_url)
+    nifty = vs.Index("NIFTY")
+    bnf = vs.Index("BANKNIFTY")
+    fin = vs.Index("FINNIFTY")
+    midcap = vs.Index("MIDCPNIFTY")
 
     indices = vs.get_strangle_indices_to_trade(
         nifty, bnf, fin, midcap, safe_indices=safe_indices
     )
 
     parameters["quantity_in_lots"] = parameters["quantity_in_lots"] // len(indices)
+    parameters["notification_url"] = discord_webhook_url
 
     # Setting the shared data
     if shared_data:
@@ -168,21 +169,34 @@ def overnight_straddle_nifty(
         authkey=authkey,
         webhook_url=discord_webhook_url,
     )
-    nifty = vs.Index("NIFTY", webhook_url=discord_webhook_url)
+    nifty = vs.Index("NIFTY")
 
     # Rolling over the short straddle
     nifty.rollover_overnight_short_straddle(
-        quantity_in_lots, strike_offset=1.003, take_avg_price=True
+        quantity_in_lots,
+        strike_offset=1.003,
+        take_avg_price=True,
+        notification_url=discord_webhook_url,
     )
 
     # Buying next week's hedge if it is expiry day
     if vs.timetoexpiry(nifty.current_expiry, in_days=True) < 1:
         nifty.buy_weekly_hedge(
-            quantity_in_lots, "strangle", call_offset=0.997, put_offset=0.98
+            quantity_in_lots,
+            "strangle",
+            call_offset=0.997,
+            put_offset=0.98,
+            notification_url=discord_webhook_url,
         )
 
     try:
-        vs.append_data_to_json(nifty.order_log, f"{user}_NIFTY_ON_straddle_log.json")
+        vs.append_data_to_json(
+            nifty.strategy_log["Overnight short straddle"],
+            f"{user}_NIFTY_overnight_short_straddle.json",
+        )
+        vs.append_data_to_json(
+            nifty.strategy_log["Weekly hedge"], f"{user}_NIFTY_weekly_hedge.json"
+        )
     except Exception as e:
         vs.notifier(f"Appending data failed: {e}", discord_webhook_url)
 
@@ -240,7 +254,9 @@ def intraday_trend_on_indices(
         webhook_url=discord_webhook_url,
     )
 
-    indices = [vs.Index(index, webhook_url=discord_webhook_url) for index in indices]
+    indices = [vs.Index(index) for index in indices]
+
+    parameters["notification_url"] = discord_webhook_url
 
     threads = []
     for index in indices:

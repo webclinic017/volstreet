@@ -878,7 +878,7 @@ class SyntheticArbSystem:
 class Index:
     """Initialize an index with the name of the index in uppercase"""
 
-    def __init__(self, name, webhook_url=None, websocket=None, spot_future_rate=0.06):
+    def __init__(self, name, spot_future_rate=0.06):
         if name not in symbol_df["SYMBOL"].values:
             closest_match, confidence = process.extractOne(
                 name, symbol_df["SYMBOL"].values
@@ -899,7 +899,6 @@ class Index:
         self.month_expiry = None
         self.fut_expiry = None
         self.order_log = defaultdict(list)
-        self.webhook_url = webhook_url
         self.spot_future_rate = spot_future_rate
         self.symbol, self.token = fetch_symbol_token(self.name)
         self.lot_size = fetch_lot_size(self.name)
@@ -927,18 +926,6 @@ class Index:
             f"Initialized {self.name} with lot size {self.lot_size}, base {self.base} and freeze qty {self.freeze_qty}"
         )
 
-        if websocket:
-            try:
-                websocket.subscribe(
-                    websocket.correlation_id,
-                    1,
-                    [{"exchangeType": self.exchange_type, "tokens": [self.token]}],
-                )
-                sleep(2)
-                print(f"{self.name}: Subscribed underlying to the websocket")
-            except Exception as e:
-                print(f"{self.name}: Websocket subscription failed. {e}")
-
     def __repr__(self):
         return (
             f"{self.__class__.__name__}(Name: {self.name}, Lot Size: {self.lot_size}, "
@@ -958,23 +945,15 @@ class Index:
             freeze_qty_in_lots = freeze_qty / self.lot_size
             return int(freeze_qty_in_lots)
         except requests.exceptions.Timeout as e:
-            notifier(
-                f"Timeout error in fetching freeze limit for {self.name}: {e}",
-                self.webhook_url,
-            )
+            logger.error(f"Timeout error in fetching freeze limit for {self.name}: {e}")
             freeze_qty_in_lots = 20
             return int(freeze_qty_in_lots)
         except requests.exceptions.HTTPError as e:
-            notifier(
-                f"HTTP error in fetching freeze limit for {self.name}: {e}",
-                self.webhook_url,
-            )
+            logger.error(f"HTTP error in fetching freeze limit for {self.name}: {e}")
             freeze_qty_in_lots = 20
             return int(freeze_qty_in_lots)
         except Exception as e:
-            notifier(
-                f"Error in fetching freeze limit for {self.name}: {e}", self.webhook_url
-            )
+            logger.error(f"Error in fetching freeze limit for {self.name}: {e}")
             freeze_qty_in_lots = 20
             return freeze_qty_in_lots
 
@@ -1170,6 +1149,7 @@ class Index:
         put_strike=None,
         return_avg_price=False,
         order_tag="",
+        notification_url=None,
     ):
         """
         Places a straddle or strangle order on the index.
@@ -1182,6 +1162,7 @@ class Index:
         put_strike: Strike price of the put (for strangle)
         return_avg_price: If True, returns the average price of the order
         order_tag: Tag to be added to the order
+        notification_url: URL to be notified when the order is placed
         """
 
         if strike is None:
@@ -1246,7 +1227,7 @@ class Index:
             notifier(
                 f"{order_prefix}Order(s) placed successfully for {buy_or_sell} {self.name} "
                 + f"{strike_info} {expiry} {quantity_in_lots} lot(s).",
-                self.webhook_url,
+                notification_url,
             )
             call_order_avg_price = (
                 lookup_and_return(
@@ -1272,14 +1253,14 @@ class Index:
             notifier(
                 f"{order_prefix}All orders rejected for {buy_or_sell} {self.name} "
                 + f"{strike_info} {expiry} {quantity_in_lots} lot(s).",
-                self.webhook_url,
+                notification_url,
             )
             raise Exception("Orders rejected")
         elif any(call_order_statuses == "open") or any(put_order_statuses == "open"):
             notifier(
                 f"{order_prefix}Some orders pending for {buy_or_sell} {self.name} "
                 + f"{strike_info} {expiry} {quantity_in_lots} lot(s). You can modify the orders.",
-                self.webhook_url,
+                notification_url,
             )
             if return_avg_price:
                 return call_price, put_price
@@ -1289,7 +1270,7 @@ class Index:
             notifier(
                 f"{order_prefix}Some orders rejected for {buy_or_sell} {self.name} "
                 + f"{strike_info} {expiry} {quantity_in_lots} lot(s). You can place the rejected orders again.",
-                self.webhook_url,
+                notification_url,
             )
             if return_avg_price:
                 return call_price, put_price
@@ -1297,7 +1278,7 @@ class Index:
             notifier(
                 f"{order_prefix}ERROR. Order statuses uncertain for {buy_or_sell} {self.name} "
                 + f"{strike_info} {expiry} {quantity_in_lots} lot(s).",
-                self.webhook_url,
+                notification_url,
             )
             raise Exception("Order statuses uncertain")
 
@@ -1324,7 +1305,13 @@ class Index:
 
     @time_the_function
     def find_equal_strike(
-        self, exit_time, websocket, wait_for_equality, target_disparity, expiry=None
+        self,
+        exit_time,
+        websocket,
+        wait_for_equality,
+        target_disparity,
+        expiry=None,
+        notification_url=None,
     ):
         expiry = expiry or self.current_expiry
         ltp = (
@@ -1434,13 +1421,13 @@ class Index:
                     logger.info(message)
                     last_log_time = currenttime()
                 if currenttime() - last_notify_time > notify_interval:
-                    notifier(message, self.webhook_url)
+                    notifier(message, notification_url)
                     last_notify_time = currenttime()
 
                 if (currenttime() + timedelta(minutes=5)).time() > time(*exit_time):
                     notifier(
                         "Equal strike tracker exited due to time limit.",
-                        self.webhook_url,
+                        notification_url,
                     )
                     raise Exception("Equal strike tracker exited due to time limit.")
 
@@ -1475,7 +1462,12 @@ class Index:
 
     @log_errors
     def rollover_overnight_short_straddle(
-        self, quantity_in_lots, strike_offset=1, iv_threshold=0.95, take_avg_price=False
+        self,
+        quantity_in_lots,
+        strike_offset=1,
+        iv_threshold=0.95,
+        take_avg_price=False,
+        notification_url=None,
     ):
         """Rollover overnight short straddle to the next expiry.
         Args:
@@ -1483,6 +1475,7 @@ class Index:
             strike_offset (float): Strike offset from the current strike.
             iv_threshold (float): IV threshold compared to vix.
             take_avg_price (bool): Take average price of the index over 5m timeframes.
+            notification_url (str): Webhook URL to send notifications.
         """
 
         def load_data():
@@ -1494,7 +1487,7 @@ class Index:
                 data = {}
                 notifier(
                     "No positions found for overnight straddle. Creating new file.",
-                    self.webhook_url,
+                    notification_url,
                 )
                 with open(f"{obj.userId}_overnight_positions.json", "w") as f:
                     json.dump(data, f)
@@ -1502,7 +1495,7 @@ class Index:
             except Exception as e:
                 notifier(
                     f"Error while reading overnight_positions.json: {e}",
-                    self.webhook_url,
+                    notification_url,
                 )
                 logger.error(
                     f"Error while reading positions.json",
@@ -1519,14 +1512,14 @@ class Index:
             if currenttime().time() < time(15, 00):
                 notifier(
                     f"{self.name} Cannot take avg price before 3pm. Try running the strategy after 3pm",
-                    self.webhook_url,
+                    notification_url,
                 )
                 raise Exception(
                     "Cannot take avg price before 3pm. Try running the strategy after 3pm"
                 )
             notifier(
                 f"{self.name} Taking average price of the index over 5m timeframes.",
-                self.webhook_url,
+                notification_url,
             )
             price_list = [self.fetch_ltp()]
             while currenttime().time() < time(15, 28):
@@ -1545,17 +1538,15 @@ class Index:
             beta = 1.3 if beta is None else beta
             vix = vix * beta
 
-        order_tag = "Overnight Short Straddle"
+        order_tag = "Overnight short straddle"
 
         weekend_in_expiry = check_for_weekend(self.current_expiry)
         ltp = avg_ltp if avg_ltp else self.fetch_ltp()
         sell_strike = findstrike(ltp * strike_offset, self.base)
-        call_ltp, put_ltp = fetch_straddle_price(
-            self.name, self.current_expiry, sell_strike
+        sell_straddle = Straddle(
+            strike=sell_strike, underlying=self.name, expiry=self.current_expiry
         )
-        call_iv, put_iv, iv = straddle_iv(
-            call_ltp, put_ltp, ltp, sell_strike, timetoexpiry(self.current_expiry)
-        )
+        call_iv, put_iv, iv = sell_straddle.ivs()
         iv = iv * 100
 
         # This if-clause checks how far the expiry is
@@ -1563,13 +1554,13 @@ class Index:
             if iv < vix * iv_threshold:
                 notifier(
                     f"{self.name} IV is too low compared to VIX - IV: {iv}, Vix: {vix}.",
-                    self.webhook_url,
+                    notification_url,
                 )
                 return
             else:
                 notifier(
                     f"{self.name} IV is fine compared to VIX - IV: {iv}, Vix: {vix}.",
-                    self.webhook_url,
+                    notification_url,
                 )
         elif (
             timetoexpiry(self.current_expiry, effective_time=True, in_days=True) < 2
@@ -1577,16 +1568,23 @@ class Index:
             sell_strike = None
             notifier(
                 f"{self.name} Only exiting current position. IV: {iv}, Vix: {vix}.",
-                self.webhook_url,
+                notification_url,
             )
         else:
             notifier(
-                f"{self.name} Rolling over overnight straddle - IV: {iv}, Vix: {vix}.",
-                self.webhook_url,
+                f"{self.name} Deploying overnight straddle - IV: {iv}, Vix: {vix}.",
+                notification_url,
             )
 
         trade_data = load_data()
         buy_strike = trade_data.get(self.name, None)
+        buy_straddle = (
+            Straddle(
+                strike=buy_strike, underlying=self.name, expiry=self.current_expiry
+            )
+            if buy_strike
+            else None
+        )
 
         # Checking if the buy strike is valid
         if (
@@ -1594,119 +1592,105 @@ class Index:
             and not isinstance(buy_strike, float)
             and buy_strike is not None
         ):
-            notifier(f"Invalid strike found for {self.name}.", self.webhook_url)
+            notifier(f"Invalid strike found for {self.name}.", notification_url)
             raise Exception(f"Invalid strike found for {self.name}.")
+
+        trade_info_dict = {
+            "Date": currenttime().strftime("%d-%m-%Y %H:%M:%S"),
+            "Underlying": self.name,
+            "Expiry": self.current_expiry,
+        }
+
+        call_buy_avg, put_buy_avg = np.nan, np.nan
+        call_sell_avg, put_sell_avg = np.nan, np.nan
 
         # Placing orders
         if buy_strike is None and sell_strike is None:
-            notifier(f"{self.name} No trade required.", self.webhook_url)
+            notifier(f"{self.name} No trade required.", notification_url)
         elif sell_strike is None:  # only exiting current position
             notifier(
                 f"{self.name} Exiting current position on strike {buy_strike}.",
-                self.webhook_url,
+                notification_url,
             )
-            call_buy_avg, put_buy_avg = self.place_combined_order(
-                self.current_expiry,
+            call_buy_avg, put_buy_avg = place_option_order_and_notify(
+                buy_straddle,
                 "BUY",
                 quantity_in_lots,
-                strike=buy_strike,
+                "LIMIT",
+                order_tag=order_tag,
+                webhook_url=notification_url,
                 return_avg_price=True,
-                order_tag=order_tag,
             )
-            self.log_combined_order(
-                buy_strike,
-                expiry=self.current_expiry,
-                buy_or_sell="BUY",
-                call_price=call_buy_avg,
-                put_price=put_buy_avg,
-                order_tag=order_tag,
-            )
+
         elif buy_strike is None:  # only entering new position
             notifier(
                 f"{self.name} Entering new position on strike {sell_strike}.",
-                self.webhook_url,
+                notification_url,
             )
-            call_sell_avg, put_sell_avg = self.place_combined_order(
-                self.current_expiry,
+            call_sell_avg, put_sell_avg = place_option_order_and_notify(
+                sell_straddle,
                 "SELL",
                 quantity_in_lots,
-                strike=sell_strike,
+                "LIMIT",
+                order_tag=order_tag,
+                webhook_url=notification_url,
                 return_avg_price=True,
-                order_tag=order_tag,
             )
-            self.log_combined_order(
-                sell_strike,
-                expiry=self.current_expiry,
-                buy_or_sell="SELL",
-                call_price=call_sell_avg,
-                put_price=put_sell_avg,
-                order_tag=order_tag,
-            )
+
         else:  # both entering and exiting positions
             if buy_strike == sell_strike:
                 notifier(
                     f"{self.name} No trade required as strike is same.",
-                    self.webhook_url,
+                    notification_url,
                 )
-                call_ltp, put_ltp = fetch_straddle_price(
-                    self.name, self.current_expiry, sell_strike
-                )
-                self.log_combined_order(
-                    buy_strike,
-                    expiry=self.current_expiry,
-                    buy_or_sell="BUY",
-                    call_price=call_ltp,
-                    put_price=put_ltp,
-                    order_tag=order_tag,
-                )
-                self.log_combined_order(
-                    sell_strike,
-                    expiry=self.current_expiry,
-                    buy_or_sell="SELL",
-                    call_price=call_ltp,
-                    put_price=put_ltp,
-                    order_tag=order_tag,
+                call_ltp, put_ltp = sell_straddle.fetch_ltp()
+                call_buy_avg, put_buy_avg, call_sell_avg, put_sell_avg = (
+                    call_ltp,
+                    put_ltp,
+                    call_ltp,
+                    put_ltp,
                 )
             else:
                 notifier(
                     f"{self.name} Buying {buy_strike} and selling {sell_strike}.",
-                    self.webhook_url,
+                    notification_url,
                 )
-                call_buy_avg, put_buy_avg = self.place_combined_order(
-                    self.current_expiry,
+                call_buy_avg, put_buy_avg = place_option_order_and_notify(
+                    buy_straddle,
                     "BUY",
                     quantity_in_lots,
-                    strike=buy_strike,
-                    return_avg_price=True,
+                    "LIMIT",
                     order_tag=order_tag,
+                    webhook_url=notification_url,
+                    return_avg_price=True,
                 )
-                call_sell_avg, put_sell_avg = self.place_combined_order(
-                    self.current_expiry,
+                call_sell_avg, put_sell_avg = place_option_order_and_notify(
+                    sell_straddle,
                     "SELL",
                     quantity_in_lots,
-                    strike=sell_strike,
+                    "LIMIT",
+                    order_tag=order_tag,
+                    webhook_url=notification_url,
                     return_avg_price=True,
-                    order_tag=order_tag,
                 )
-                self.log_combined_order(
-                    buy_strike,
-                    expiry=self.current_expiry,
-                    buy_or_sell="BUY",
-                    call_price=call_buy_avg,
-                    put_price=put_buy_avg,
-                    order_tag=order_tag,
-                )
-                self.log_combined_order(
-                    sell_strike,
-                    expiry=self.current_expiry,
-                    buy_or_sell="SELL",
-                    call_price=call_sell_avg,
-                    put_price=put_sell_avg,
-                    order_tag=order_tag,
-                )
+
+        trade_info_dict.update(
+            {
+                "Buy Strike": buy_strike,
+                "Buy Call Price": call_buy_avg,
+                "Buy Put Price": put_buy_avg,
+                "Buy Total Price": call_buy_avg + put_buy_avg,
+                "Sell Strike": sell_strike,
+                "Sell Call Price": call_sell_avg,
+                "Sell Put Price": put_sell_avg,
+                "Sell Total Price": call_sell_avg + put_sell_avg,
+            }
+        )
 
         trade_data[self.name] = sell_strike
         save_data(trade_data)
+
+        self.strategy_log[order_tag].append(trade_info_dict)
 
     @log_errors
     def buy_weekly_hedge(
@@ -1716,40 +1700,47 @@ class Index:
         strike_offset=1,
         call_offset=1,
         put_offset=1,
+        notification_url=None,
     ):
+        order_tag = "Weekly hedge"
+
         ltp = self.fetch_ltp()
         if type_of_hedge == "strangle":
             call_strike = findstrike(ltp * call_offset, self.base)
             put_strike = findstrike(ltp * put_offset, self.base)
             strike = None
+            instrument = Strangle(call_strike, put_strike, self.name, self.next_expiry)
         elif type_of_hedge == "straddle":
             strike = findstrike(ltp * strike_offset, self.base)
             call_strike = None
             put_strike = None
+            instrument = Straddle(strike, self.name, self.next_expiry)
         else:
             raise Exception("Invalid type of hedge.")
 
-        call_buy_avg, put_buy_avg = self.place_combined_order(
-            self.next_expiry,
+        call_buy_avg, put_buy_avg = place_option_order_and_notify(
+            instrument,
             "BUY",
             quantity_in_lots,
-            strike=strike,
-            call_strike=call_strike,
-            put_strike=put_strike,
-            order_tag="Weekly Hedge",
+            "LIMIT",
+            order_tag=order_tag,
+            webhook_url=notification_url,
             return_avg_price=True,
         )
 
-        self.log_combined_order(
-            strike=strike,
-            call_strike=call_strike,
-            put_strike=put_strike,
-            expiry=self.next_expiry,
-            buy_or_sell="BUY",
-            call_price=call_buy_avg,
-            put_price=put_buy_avg,
-            order_tag="Weekly Hedge",
-        )
+        trade_info_dict = {
+            "Date": currenttime().strftime("%d-%m-%Y %H:%M:%S"),
+            "Underlying": self.name,
+            "Expiry": self.next_expiry,
+            "Buy Strike(s)": strike
+            if strike is not None
+            else (call_strike, put_strike),
+            "Buy Call Price": call_buy_avg,
+            "Buy Put Price": put_buy_avg,
+            "Buy Total Price": call_buy_avg + put_buy_avg,
+        }
+
+        self.strategy_log[order_tag].append(trade_info_dict)
 
     @log_errors
     def intraday_straddle(
@@ -1773,6 +1764,7 @@ class Index:
         take_profit_points=np.inf,
         convert_to_butterfly=False,
         check_force_exit=False,
+        notification_url=None,
     ):
         """Params:
         quantity_in_lots: int
@@ -1818,11 +1810,12 @@ class Index:
             wait_for_equality=wait_for_equality,
             target_disparity=target_disparity,
             expiry=expiry,
+            notification_url=notification_url,
         )
 
         notifier(
             f"{self.name}: Initiating intraday trade on {equal_strike} strike.",
-            self.webhook_url,
+            notification_url,
         )
 
         # Placing orders
@@ -1833,6 +1826,7 @@ class Index:
             strike=equal_strike,
             return_avg_price=True,
             order_tag=order_tag,
+            notification_url=notification_url,
         )
 
         underlying_price = self.fetch_ltp()
@@ -1894,11 +1888,11 @@ class Index:
             put_sl_statuses == "trigger pending"
         ):
             notifier(
-                f"{self.name} stoploss orders placed successfully", self.webhook_url
+                f"{self.name} stoploss orders placed successfully", notification_url
             )
         else:
             notifier(
-                f"{self.name} stoploss orders not placed successfully", self.webhook_url
+                f"{self.name} stoploss orders not placed successfully", notification_url
             )
             raise Exception("Stoploss orders not placed successfully")
 
@@ -1925,7 +1919,7 @@ class Index:
         )
         summary_iv = traded_avg_iv if traded_avg_iv is not None else 0
         summary_message += f"\nTraded IV: {summary_iv * 100:0.2f}"
-        notifier(summary_message, self.webhook_url)
+        notifier(summary_message, notification_url)
         sleep(1)
 
         def write_force_exit_status(user):
@@ -2035,7 +2029,7 @@ class Index:
                         f"{self.name} take profit exit triggered\n"
                         f"Time: {currenttime().time()}\n"
                         f"Profit: {profit_in_pts}\n",
-                        self.webhook_url,
+                        notification_url,
                     )
                     take_profit_exit = True
 
@@ -2051,7 +2045,7 @@ class Index:
                         if ctb_hedge is not None:
                             notifier(
                                 f"{self.name} Convert to butterfly triggered\n",
-                                self.webhook_url,
+                                notification_url,
                             )
                             ctb_trg = True
                             ctb_message = f"Hedged with: {ctb_hedge}\n"
@@ -2100,7 +2094,7 @@ class Index:
                                 f"Time: {currenttime().time()}\n"
                                 f"Average delta: {average_delta}\n"
                                 f"Incremental gains: {incremental_gains}\n",
-                                self.webhook_url,
+                                notification_url,
                             )
                             smart_exit_notification_sent = True
                             smart_exit_trg = True
@@ -2145,7 +2139,7 @@ class Index:
 
             orderbook = fetch_orderbook_if_needed(data, refresh)
             triggered, complete = process_stop_loss_order_statuses(
-                orderbook, order_ids, context=f"SL: {side}", notify_url=self.webhook_url
+                orderbook, order_ids, context=f"SL: {side}", notify_url=notification_url
             )
 
             if not triggered and not complete:
@@ -2169,7 +2163,7 @@ class Index:
                     notifier(
                         f"{self.name} {side.capitalize()} stoploss triggered. "
                         f"Unable to calculate IV spike due to missing IV data.",
-                        self.webhook_url,
+                        notification_url,
                     )
                 else:
                     price_function = bs.call if side == "call" else bs.put
@@ -2192,7 +2186,7 @@ class Index:
                             f"Movement: {movement_from_entry * 100:0.2f}\nPresent IV: {present_iv}\n"
                             f"IV spike: {iv_spike}\nIdeal Price: {ideal_price}\nPresent Price: {present_price}\n"
                             f"Price Spike: {price_spike}",
-                            self.webhook_url,
+                            notification_url,
                         )
                     else:
                         notifier(
@@ -2200,7 +2194,7 @@ class Index:
                             f"Movement: {movement_from_entry * 100:0.2f}\nPresent IV: {present_iv}\n"
                             f"IV spike: {iv_spike}\nIdeal Price: {ideal_price}\nPresent Price: {present_price}\n"
                             f"Price Spike: {price_spike}",
-                            self.webhook_url,
+                            notification_url,
                         )
             if complete:
                 exit_price = (
@@ -2244,7 +2238,7 @@ class Index:
                 f"{self.name} {sl_type} trend catcher starting. "
                 + f"Placed {qty} lots of {strike} {opt_type} at {option_ltp}. "
                 + f"Stoploss price: {sl_price}, Underlying Price: {underlying_price}",
-                self.webhook_url,
+                notification_url,
             )
             trend_sl_hit = False
             last_print_time = currenttime()
@@ -2274,11 +2268,11 @@ class Index:
             if trend_sl_hit:
                 notifier(
                     f"{self.name} {sl_type} trend catcher stoploss hit.",
-                    self.webhook_url,
+                    notification_url,
                 )
             else:
                 notifier(
-                    f"{self.name} {sl_type} trend catcher exiting.", self.webhook_url
+                    f"{self.name} {sl_type} trend catcher exiting.", notification_url
                 )
 
             for qty in trend_spliced_orders:
@@ -2331,7 +2325,7 @@ class Index:
                     )
                     other_stoploss_order_ids.append(sl_order_id)
 
-            # notifier(f'{self.name} {sl_type} stoploss triggered and completed.', self.webhook_url)
+            # notifier(f'{self.name} {sl_type} stoploss triggered and completed.', notification_url)
 
             refresh = True
             sleep(5)
@@ -2389,7 +2383,11 @@ class Index:
             else:
                 sl_type = "None"
                 self.place_combined_order(
-                    expiry, "BUY", quantity_in_lots, strike=equal_strike
+                    expiry,
+                    "BUY",
+                    quantity_in_lots,
+                    strike=equal_strike,
+                    notification_url=notification_url,
                 )
                 if hedged:
                     # noinspection PyUnresolvedReferences
@@ -2399,6 +2397,7 @@ class Index:
                         quantity_in_lots,
                         call_strike=ctb_hedge.call_strike,
                         put_strike=ctb_hedge.put_strike,
+                        notification_url=notification_url,
                     )
 
             return sl_type
@@ -2442,7 +2441,7 @@ class Index:
             break_even_price = total_avg_price - per_share_charges
             notifier(
                 f"{self.name}: Charges per share {per_share_charges} | Break even price {break_even_price}",
-                self.webhook_url,
+                notification_url,
             )
 
         # Setting up stop loss dictionary and starting price thread
@@ -2470,7 +2469,7 @@ class Index:
                     put_stoploss_order_ids, "put", refresh=refresh_orderbook
                 )
             except Exception as e:
-                notifier(f"{self.name} Error: {e}", self.webhook_url)
+                notifier(f"{self.name} Error: {e}", notification_url)
                 error_faced = True
                 price_updater.join()
                 raise Exception(f"Error: {e}")
@@ -2515,9 +2514,10 @@ class Index:
                 call_strike=ctb_hedge.call_strike,
                 put_strike=ctb_hedge.put_strike,
                 order_tag=order_tag + " CTB",
+                notification_url=notification_url,
             )
             cancel_pending_orders(call_stoploss_order_ids + put_stoploss_order_ids)
-            notifier(f"{self.name}: Converted to butterfly", self.webhook_url)
+            notifier(f"{self.name}: Converted to butterfly", notification_url)
             while not check_exit_conditions(currenttime().time(), time(*exit_time)):
                 sleep(3)
 
@@ -2560,13 +2560,13 @@ class Index:
         except Exception as e:
             notifier(
                 f"{self.name}: Error updating order list with exit details. {e}",
-                self.webhook_url,
+                notification_url,
             )
 
         notifier(
             f"{self.name}: Exited positions\n"
             + "".join([f"{key}: {value}\n" for key, value in exit_dict.items()]),
-            self.webhook_url,
+            notification_url,
         )
         in_trade = False
 
@@ -2590,6 +2590,7 @@ class Index:
         move_sl_to_cost=False,
         convert_to_butterfly=False,
         shared_data=None,
+        notification_url=None,
     ):
         """Intraday strangle strategy. Trades strangle with stop loss. All offsets are in percentage terms.
         Parameters
@@ -2628,6 +2629,8 @@ class Index:
             Convert to butterfly or not, by default False
         shared_data : SharedData class, optional
             shared data about client level orderbook and positions, by default None
+        notification_url : str, optional
+            URL for sending notifications, by default None
         """
 
         @log_errors
@@ -2748,7 +2751,7 @@ class Index:
                         if ctb_hedge is not None:
                             notifier(
                                 f"{self.name} Convert to butterfly triggered\n",
-                                self.webhook_url,
+                                notification_url,
                             )
                             info_dict["exit_triggers"].update(
                                 {"convert_to_butterfly": True}
@@ -2783,7 +2786,7 @@ class Index:
                     logger.info(message)
                     last_log_time = currenttime()
                 if currenttime() - last_notify_time > notify_interval:
-                    notifier(message, self.webhook_url)
+                    notifier(message, notification_url)
                     last_notify_time = currenttime()
                 sleep(sleep_time)
 
@@ -2826,7 +2829,7 @@ class Index:
                 qty_in_lots,
                 "LIMIT",
                 "Intraday Strangle Trend Catcher",
-                self.webhook_url,
+                notification_url,
             )
 
             # Setting up the stop loss
@@ -2838,7 +2841,7 @@ class Index:
                 f"{self.name} strangle {sl_type} trend catcher starting. "
                 + f"Placed {qty_in_lots} lots of {strike} {opt_type} at {trend_option.fetch_ltp()}. "
                 + f"Stoploss price: {sl_price}, Underlying Price: {spot_price}",
-                self.webhook_url,
+                notification_url,
             )
 
             last_print_time = currenttime()
@@ -2870,12 +2873,12 @@ class Index:
             if trend_sl_hit:
                 notifier(
                     f"{self.name} strangle {sl_type} trend catcher stoploss hit.",
-                    self.webhook_url,
+                    notification_url,
                 )
             else:
                 notifier(
                     f"{self.name} strangle {sl_type} trend catcher exiting.",
-                    self.webhook_url,
+                    notification_url,
                 )
 
             # Buying the trend option back
@@ -2885,7 +2888,7 @@ class Index:
                 qty_in_lots,
                 "LIMIT",
                 "Intraday Strangle Trend Catcher",
-                self.webhook_url,
+                notification_url,
             )
 
         def justify_stop_loss(info_dict, side):
@@ -2916,9 +2919,13 @@ class Index:
                 input_error_message = (
                     f"OptionModelInputError in justify_stop_loss for {self.name} {side} strangle. "
                     f"Setting estimated_movement to {estimated_movement}"
+                    f"Input flag: {side}, "
+                    f"Input stop loss price: {info_dict.get(f'{side}_stop_loss_price')}, "
+                    f"Input avg price: {info_dict.get(f'{side}_avg_price')}, "
+                    f"Input entry spot: {entry_spot}"
                 )
                 logger.error(input_error_message)
-                notifier(input_error_message, self.webhook_url)
+                notifier(input_error_message, notification_url)
 
             actual_movement = (current_spot - entry_spot) / entry_spot
             difference_in_sign = np.sign(estimated_movement) != np.sign(actual_movement)
@@ -2930,7 +2937,7 @@ class Index:
                         f"{self.name} strangle {side} stop loss appears to be unjustified. "
                         f"Estimated movement: {estimated_movement}, Actual movement: {actual_movement}"
                     )
-                    notifier(message, self.webhook_url)
+                    notifier(message, notification_url)
                     info_dict[f"{side}_sl_check_notification_sent"] = True
                 return False
             else:
@@ -2938,7 +2945,7 @@ class Index:
                     f"{self.name} strangle {side} stop loss triggered. "
                     f"Estimated movement: {estimated_movement}, Actual movement: {actual_movement}"
                 )
-                notifier(message, self.webhook_url)
+                notifier(message, notification_url)
                 return True
 
         def check_for_stop_loss(info_dict, side, refresh_orderbook=False):
@@ -2965,7 +2972,7 @@ class Index:
                     orderbook,
                     stop_loss_order_ids,
                     context=side,
-                    notify_url=self.webhook_url,
+                    notify_url=notification_url,
                 )
                 if orders_triggered:
                     justify_stop_loss(info_dict, side)
@@ -2995,7 +3002,7 @@ class Index:
                     quantity_in_lots,
                     "LIMIT",
                     order_tag,
-                    self.webhook_url,
+                    notification_url,
                 )
             else:
                 orderbook = fetch_book("orderbook")
@@ -3032,7 +3039,7 @@ class Index:
                         qty_in_lots=quantity_in_lots,
                         prices=info_dict[f"{other_side}_stop_loss_price"],
                         order_tag=f"{other_side} SL Strangle",
-                        webhook_url=self.webhook_url,
+                        webhook_url=notification_url,
                         stop_loss_order=True,
                         target_status="trigger pending",
                         return_avg_price=False,
@@ -3067,7 +3074,7 @@ class Index:
                         )
                         notifier(
                             f"{self.name} strangle {other_side} stop loss hit.",
-                            self.webhook_url,
+                            notification_url,
                         )
                         other_exit_price = place_option_order_and_notify(
                             other_sl_option,
@@ -3075,7 +3082,7 @@ class Index:
                             quantity_in_lots,
                             "LIMIT",
                             order_tag,
-                            self.webhook_url,
+                            notification_url,
                         )
                     else:
                         orderbook = fetch_book("orderbook")
@@ -3122,7 +3129,7 @@ class Index:
         if strangle is None:
             notifier(
                 f"{self.name} no strangle found within disparity threshold {disparity_threshold}",
-                self.webhook_url,
+                notification_url,
             )
             return
         call_ltp, put_ltp = strangle.fetch_ltp()
@@ -3132,11 +3139,17 @@ class Index:
             quantity_in_lots,
             "LIMIT",
             order_tag,
-            self.webhook_url,
+            notification_url,
             return_avg_price=True,
         )
-        call_avg_price = call_ltp if np.isnan(call_avg_price) else call_avg_price
-        put_avg_price = put_ltp if np.isnan(put_avg_price) else put_avg_price
+        call_avg_price = (
+            call_ltp
+            if np.isnan(call_avg_price) or call_avg_price == 0
+            else call_avg_price
+        )
+        put_avg_price = (
+            put_ltp if np.isnan(put_avg_price) or put_avg_price == 0 else put_avg_price
+        )
         total_avg_price = call_avg_price + put_avg_price
 
         # Setting stop loss
@@ -3196,7 +3209,7 @@ class Index:
         summary_message += (
             f"\nCall SL: {call_stop_loss_price}, Put SL: {put_stop_loss_price}"
         )
-        notifier(summary_message, self.webhook_url)
+        notifier(summary_message, notification_url)
 
         if place_sl_orders:
             call_stop_loss_order_ids = place_option_order_and_notify(
@@ -3205,7 +3218,7 @@ class Index:
                 qty_in_lots=quantity_in_lots,
                 prices=call_stop_loss_price,
                 order_tag="Call SL Strangle",
-                webhook_url=self.webhook_url,
+                webhook_url=notification_url,
                 stop_loss_order=True,
                 target_status="trigger pending",
                 return_avg_price=False,
@@ -3216,7 +3229,7 @@ class Index:
                 qty_in_lots=quantity_in_lots,
                 prices=put_stop_loss_price,
                 order_tag="Put SL Strangle",
-                webhook_url=self.webhook_url,
+                webhook_url=notification_url,
                 stop_loss_order=True,
                 target_status="trigger pending",
                 return_avg_price=False,
@@ -3289,7 +3302,7 @@ class Index:
                 quantity_in_lots,
                 "LIMIT",
                 order_tag,
-                self.webhook_url,
+                notification_url,
                 return_avg_price=False,
             )
             if place_sl_orders:
@@ -3297,7 +3310,7 @@ class Index:
                     shared_info_dict["call_stop_loss_order_ids"]
                     + shared_info_dict["put_stop_loss_order_ids"]
                 )
-            notifier(f"{self.name}: Converted to butterfly", self.webhook_url)
+            notifier(f"{self.name}: Converted to butterfly", notification_url)
             while currenttime().time() < time(*exit_time):
                 sleep(3)
 
@@ -3317,7 +3330,7 @@ class Index:
                     quantity_in_lots,
                     "LIMIT",
                     order_tag,
-                    self.webhook_url,
+                    notification_url,
                     return_avg_price=True,
                 )
             # noinspection PyTypeChecker
@@ -3344,7 +3357,7 @@ class Index:
                     quantity_in_lots,
                     "LIMIT",
                     order_tag,
-                    self.webhook_url,
+                    notification_url,
                 )
             if place_sl_orders:
                 cancel_pending_orders(
@@ -3382,7 +3395,7 @@ class Index:
             "Put stop loss": shared_info_dict["put_sl"],
         }
 
-        notifier(exit_message, self.webhook_url)
+        notifier(exit_message, notification_url)
         shared_info_dict["trade_complete"] = True
         position_monitor_thread.join()
 
@@ -3402,6 +3415,7 @@ class Index:
         seconds_to_avg=45,
         beta=0.8,
         max_entries=3,
+        notification_url=None,
     ):
         strategy_tag = "Intraday trend"
 
@@ -3429,7 +3443,7 @@ class Index:
             f"{self.name} trender starting with {threshold_movement:0.2f} threshold movement\n"
             f"Current Price: {open_price}\nUpper limit: {price_boundaries[0]:0.2f}\n"
             f"Lower limit: {price_boundaries[1]:0.2f}.",
-            self.webhook_url,
+            notification_url,
         )
 
         entries = 0
@@ -3440,7 +3454,7 @@ class Index:
             # Scan for entry condition
             notifier(
                 f"{self.name} trender {entries+1} scanning for entry condition.",
-                self.webhook_url,
+                notification_url,
             )
             while (abs(movement) < threshold_movement) and (
                 currenttime().time() < scan_end_time
@@ -3460,7 +3474,7 @@ class Index:
             if currenttime().time() > scan_end_time:
                 notifier(
                     f"{self.name} trender {entries+1} exiting due to time.",
-                    self.webhook_url,
+                    notification_url,
                 )
                 return
 
@@ -3476,7 +3490,7 @@ class Index:
             notifier(
                 f"{self.name} {position} trender triggered with {movement:0.2f} movement. {self.name} at {price}. "
                 f"Stop loss at {stop_loss_price}.",
-                self.webhook_url,
+                notification_url,
             )
             call_entry_price, put_entry_price = place_option_order_and_notify(
                 atm_synthetic_fut,
@@ -3484,7 +3498,7 @@ class Index:
                 quantity_in_lots,
                 "LIMIT",
                 strategy_tag,
-                self.webhook_url,
+                notification_url,
                 return_avg_price=True,
             )
 
@@ -3497,7 +3511,7 @@ class Index:
             notifier(
                 f"{self.name} trender {entries+1} entry price: {entry_price}, "
                 f"spot-future basis: {spot_future_basis}",
-                self.webhook_url,
+                notification_url,
             )
 
             trade_info = {
@@ -3530,7 +3544,7 @@ class Index:
             stop_loss_message = f"Trender stop loss hit. " if stop_loss_hit else ""
             notifier(
                 f"{stop_loss_message}{self.name} trender {entries+1} exiting. {self.name} at {price}.",
-                self.webhook_url,
+                notification_url,
             )
             call_exit_price, put_exit_price = place_option_order_and_notify(
                 atm_synthetic_fut,
@@ -3538,7 +3552,7 @@ class Index:
                 quantity_in_lots,
                 "LIMIT",
                 strategy_tag,
-                self.webhook_url,
+                notification_url,
             )
 
             if call_exit_price == 0 or put_exit_price == 0:
@@ -3555,7 +3569,7 @@ class Index:
             notifier(
                 f"{self.name} trender {entries+1} exit price: {exit_price}, "
                 f"spot-future basis: {spot_future_basis}, pnl: {pnl}",
-                self.webhook_url,
+                notification_url,
             )
 
             trade_info.update(
@@ -3580,6 +3594,7 @@ class Index:
         websocket=None,
         wait_for_equality=False,
         delta_threshold=1,
+        notification_url=None,
         **kwargs,
     ):
         # Finding equal strike
@@ -3591,14 +3606,20 @@ class Index:
             put_token,
             call_price,
             put_price,
-        ) = self.find_equal_strike(exit_time, websocket, wait_for_equality, **kwargs)
+        ) = self.find_equal_strike(
+            exit_time,
+            websocket,
+            wait_for_equality,
+            notification_url=notification_url,
+            **kwargs,
+        )
         expiry = self.current_expiry
         print(
             f"Index: {self.name}, Strike: {equal_strike}, Call: {call_price}, Put: {put_price}"
         )
         notifier(
             f"{self.name}: Initiating intraday trade on {equal_strike} strike.",
-            self.webhook_url,
+            notification_url,
         )
 
         # Placing orders
@@ -3609,6 +3630,7 @@ class Index:
             strike=equal_strike,
             return_avg_price=True,
             order_tag="Intraday straddle with delta",
+            notification_url=notification_url,
         )
 
         positions = {
@@ -3667,7 +3689,7 @@ class Index:
                     notifier(
                         f"Delta greater than {delta_threshold}. Selling {lots_to_sell} "
                         + f"synthetic futures to reduce delta.\n",
-                        self.webhook_url,
+                        notification_url,
                     )
                     place_synthetic_fut_order(
                         self.name,
@@ -3688,7 +3710,7 @@ class Index:
                     notifier(
                         f"Delta less than -{delta_threshold}. Buying {lots_to_buy} "
                         + f"synthetic futures to reduce delta.\n",
-                        self.webhook_url,
+                        notification_url,
                     )
                     place_synthetic_fut_order(
                         self.name,
@@ -3707,13 +3729,14 @@ class Index:
             sleep(2)
 
         # Closing the main positions along with the delta positions if any are open
-        notifier(f"Intraday straddle with delta: Closing positions.", self.webhook_url)
+        notifier(f"Intraday straddle with delta: Closing positions.", notification_url)
         self.place_combined_order(
             expiry,
             "BUY",
             quantity_in_lots,
             strike=equal_strike,
             order_tag="Intraday straddle with delta",
+            notification_url=notification_url,
         )
 
         # Squaring off the delta positions
@@ -3736,19 +3759,17 @@ class Index:
             notifier(
                 f"Intraday Straddle with delta: Squared off delta positions. "
                 + f"{action} {quantity_to_square_up} synthetic futures.",
-                self.webhook_url,
+                notification_url,
             )
         elif call_delta_quantity == 0 and put_delta_quantity == 0:
-            notifier("No delta positions to square off.", self.webhook_url)
+            notifier("No delta positions to square off.", notification_url)
         else:
             raise AssertionError("Delta positions are not balanced.")
 
 
 class Stock(Index):
-    def __init__(
-        self, name, webhook_url=None, websocket=None, spot_future_difference=0.06
-    ):
-        super().__init__(name, webhook_url, websocket, spot_future_difference)
+    def __init__(self, name, spot_future_difference=0.06):
+        super().__init__(name, spot_future_difference)
 
 
 def convert_to_serializable(data):
@@ -3765,6 +3786,9 @@ def convert_to_serializable(data):
 
 
 def append_data_to_json(new_data: defaultdict | dict | list, file_name: str) -> None:
+    if new_data is None:
+        return
+
     # Attempt to read the existing data from the JSON file
     try:
         with open(file_name, "r") as file:
@@ -4430,11 +4454,22 @@ def fetch_symbol_token(
                 & (scrips.exch_seg == "NSE")
                 & (scrips.instrumenttype != "AMXIDX")
             ]  # Temp fix for AMXIDX
-            # print(f'Length of filtered scrips: {len(filtered_scrips)}')
-            assert (
-                len(filtered_scrips) == 1
-            ), "More than one index scrip found for name."
-            symbol, token = filtered_scrips[["symbol", "token"]].values[0]
+
+            if len(filtered_scrips) != 1:
+                logger.error(
+                    f"Could not find symbol, token for {name} from scrips file."
+                )
+                if len(filtered_scrips) == 0:
+                    logger.error(f"No scrips found: {filtered_scrips}")
+                else:
+                    logger.error(f"Multiple scrips found: {filtered_scrips}")
+
+                symbol, token = (
+                    ("NIFTY", "26000") if name == "NIFTY" else ("BANKNIFTY", "26009")
+                )  # Temp fix for NIFTY & BANKNIFTY. To be removed later.
+
+            else:
+                symbol, token = filtered_scrips[["symbol", "token"]].values[0]
 
         elif name in ["FINNIFTY", "MIDCPNIFTY"]:  # Finnifty & Midcpnifty temp fix
             futures = scrips.loc[
