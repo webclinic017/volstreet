@@ -2675,7 +2675,6 @@ class Index:
             ctb_hedge = Strangle(ctb_call_strike, ctb_put_strike, self.name, expiry)
 
             def process_ctb(h_strangle):
-
                 hedge_total_ltp = h_strangle.fetch_total_ltp()
 
                 hedge_profit = (
