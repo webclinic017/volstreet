@@ -74,5 +74,6 @@ scrips["expiry_dt"] = pd.to_datetime(
 )
 scrips["expiry_formatted"] = scrips["expiry_dt"].dt.strftime("%d%b%y")
 scrips["expiry_formatted"] = scrips["expiry_formatted"].str.upper()
+token_symbol_dict = dict(zip(scrips["token"], scrips["symbol"]))
 
 logger = create_logger("volstreet")

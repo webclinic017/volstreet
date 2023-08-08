@@ -113,6 +113,14 @@ def implied_volatility(price, S, K, t, r, flag):
         return brentq(
             f, a=1e-12, b=100, xtol=1e-15, rtol=1e-15, maxiter=1000, full_output=False
         )
+    except ValueError as e:
+        if "f(a) and f(b) must have different signs" in str(e):
+            raise e
+        else:
+            bs_logger.error(
+                f"Error in implied_volatility: {e}, price={price}, S={S}, K={K}, t={t}, r={r}, flag={flag}"
+            )
+            raise e
     except Exception as e:
         bs_logger.error(
             f"Error in implied_volatility: {e}, price={price}, S={S}, K={K}, t={t}, r={r}, flag={flag}"

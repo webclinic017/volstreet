@@ -8,8 +8,8 @@ from SmartApi import SmartConnect
 from SmartApi.smartExceptions import DataException
 import pyotp
 from threading import Thread
-from SmartApi.smartWebSocketV2 import SmartWebSocketV2
-from volstreet.constants import scrips, holidays, symbol_df, logger
+from volstreet.SmartWebSocketV2 import SmartWebSocketV2
+from volstreet.constants import scrips, holidays, symbol_df, logger, token_symbol_dict
 from volstreet import blackscholes as bs, datamodule as dm
 from volstreet.exceptions import OptionModelInputError
 from collections import defaultdict, deque
@@ -33,6 +33,7 @@ def set_error_notification_settings(key, value):
 
 
 def time_the_function(func):
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         start = datetime.now()
         result = func(*args, **kwargs)
@@ -73,7 +74,8 @@ class OptionChains(defaultdict):
 
 
 class PriceFeed(SmartWebSocketV2):
-    def __init__(self, obj, login_data, webhook_url=None, correlation_id="default"):
+    def __init__(self, webhook_url=None, correlation_id="default"):
+        global login_data, obj
         auth_token = login_data["data"]["jwtToken"]
         feed_token = obj.getfeedToken()
         api_key = obj.api_key
@@ -137,8 +139,7 @@ class PriceFeed(SmartWebSocketV2):
 
     def parse_price_dict(self):
         new_price_dict = {
-            scrips.loc[scrips.token == token]["symbol"].values[0]: value
-            for token, value in self.price_dict.items()
+            token_symbol_dict[token]: value for token, value in self.price_dict.items()
         }
         new_price_dict.update(
             {"FINNIFTY": {"ltp": self.finnifty_index.fetch_ltp()}}
@@ -214,11 +215,10 @@ class PriceFeed(SmartWebSocketV2):
             ]
             self.subscribe(self.correlation_id, mode, token_list)
             self.index_option_chains_subscribed.append(underlying.name)
-        sleep(3)
 
+    @log_errors
     def update_option_chain(
         self,
-        sleep_time=5,
         exit_time=(15, 30),
         process_iv_log=True,
         market_depth=True,
@@ -228,7 +228,6 @@ class PriceFeed(SmartWebSocketV2):
         iv_threshold=1.1,
     ):
         while currenttime().time() < time(*exit_time):
-            parsed_dict = self.parse_price_dict()
             indices = self.index_option_chains_subscribed
             for index in indices:
                 expiries_subscribed = set(
@@ -238,7 +237,6 @@ class PriceFeed(SmartWebSocketV2):
                     self.build_option_chain(
                         index,
                         expiry,
-                        parsed_dict,
                         market_depth,
                         process_iv_log,
                         calculate_iv,
@@ -247,20 +245,18 @@ class PriceFeed(SmartWebSocketV2):
                         stop_iv_calculation_hours,
                     )
 
-            sleep(sleep_time)
-
     def build_option_chain(
         self,
         index: str,
         expiry: str,
-        parsed_dict: dict,
-        market_depth,
-        process_iv_log,
-        calculate_iv,
-        n_values,
-        iv_threshold,
-        stop_iv_calculation_hours=3,
+        market_depth: bool = False,
+        process_iv_log: bool = False,
+        calculate_iv: bool = False,
+        n_values: int = 100,
+        iv_threshold: float = 1.1,
+        stop_iv_calculation_hours: int = 3,
     ):
+        parsed_dict = self.parse_price_dict()
         instrument_info = parsed_dict[index]
         spot = instrument_info["ltp"]
 
@@ -726,37 +722,6 @@ class SyntheticFuture(Strangle):
 class SyntheticArbSystem:
     def __init__(self, symbol_option_chains):
         self.symbol_option_chains = symbol_option_chains
-        self.index_expiry_pairs = {}
-        self.successful_trades = 0
-        self.unsuccessful_trades = 0
-
-    def get_single_index_single_expiry_data(self, index, expiry):
-        option_chain = self.symbol_option_chains[index][expiry]
-        strikes = [strike for strike in option_chain]
-        call_prices = [option_chain[strike]["call_price"] for strike in strikes]
-        put_prices = [option_chain[strike]["put_price"] for strike in strikes]
-        call_bids = [option_chain[strike]["call_best_bid"] for strike in strikes]
-        call_asks = [option_chain[strike]["call_best_ask"] for strike in strikes]
-        put_bids = [option_chain[strike]["put_best_bid"] for strike in strikes]
-        put_asks = [option_chain[strike]["put_best_ask"] for strike in strikes]
-        call_bid_qty = [option_chain[strike]["call_best_bid_qty"] for strike in strikes]
-        call_ask_qty = [option_chain[strike]["call_best_ask_qty"] for strike in strikes]
-        put_bid_qty = [option_chain[strike]["put_best_bid_qty"] for strike in strikes]
-        put_ask_qty = [option_chain[strike]["put_best_ask_qty"] for strike in strikes]
-
-        return (
-            np.array(strikes),
-            np.array(call_prices),
-            np.array(put_prices),
-            np.array(call_bids),
-            np.array(call_asks),
-            np.array(put_bids),
-            np.array(put_asks),
-            np.array(call_bid_qty),
-            np.array(call_ask_qty),
-            np.array(put_bid_qty),
-            np.array(put_ask_qty),
-        )
 
     def find_arbitrage_opportunities(
         self,
@@ -764,8 +729,43 @@ class SyntheticArbSystem:
         expiry: str,
         qty_in_lots: int,
         exit_time=(15, 28),
-        threshold=3,
+        threshold=3,  # in points
     ):
+        def get_single_index_single_expiry_data(_index, _expiry):
+            option_chain = self.symbol_option_chains[_index][_expiry]
+            _strikes = [_s for _s in option_chain]
+            _call_prices = [option_chain[_s]["call_price"] for _s in _strikes]
+            _put_prices = [option_chain[_s]["put_price"] for _s in _strikes]
+            _call_bids = [option_chain[_s]["call_best_bid"] for _s in _strikes]
+            _call_asks = [option_chain[_s]["call_best_ask"] for _s in _strikes]
+            _put_bids = [option_chain[_s]["put_best_bid"] for _s in _strikes]
+            _put_asks = [option_chain[_s]["put_best_ask"] for _s in _strikes]
+            _call_bid_qty = [option_chain[_s]["call_best_bid_qty"] for _s in _strikes]
+            _call_ask_qty = [option_chain[_s]["call_best_ask_qty"] for _s in _strikes]
+            _put_bid_qty = [option_chain[_s]["put_best_bid_qty"] for _s in _strikes]
+            _put_ask_qty = [option_chain[_s]["put_best_ask_qty"] for _s in _strikes]
+
+            return (
+                np.array(_strikes),
+                np.array(_call_prices),
+                np.array(_put_prices),
+                np.array(_call_bids),
+                np.array(_call_asks),
+                np.array(_put_bids),
+                np.array(_put_asks),
+                np.array(_call_bid_qty),
+                np.array(_call_ask_qty),
+                np.array(_put_bid_qty),
+                np.array(_put_ask_qty),
+            )
+
+        def return_both_side_synthetic_prices(
+            _strikes, _call_asks, _put_bids, _call_bids, _put_asks
+        ):
+            return (_strikes + _call_asks - _put_bids), (
+                _strikes + _call_bids - _put_asks
+            )
+
         (
             strikes,
             call_prices,
@@ -778,9 +778,10 @@ class SyntheticArbSystem:
             call_ask_qty,
             put_bid_qty,
             put_ask_qty,
-        ) = self.get_single_index_single_expiry_data(index, expiry)
-        synthetic_buy_prices = strikes + call_asks - put_bids
-        synthetic_sell_prices = strikes + call_bids - put_asks
+        ) = get_single_index_single_expiry_data(index, expiry)
+        synthetic_buy_prices, synthetic_sell_prices = return_both_side_synthetic_prices(
+            strikes, call_asks, put_bids, call_bids, put_asks
+        )
         min_price_index = np.argmin(synthetic_buy_prices)
         max_price_index = np.argmax(synthetic_sell_prices)
         min_price = synthetic_buy_prices[min_price_index]
@@ -788,12 +789,13 @@ class SyntheticArbSystem:
 
         last_print_time = currenttime()
         while currenttime().time() < time(*exit_time):
-            # print(strikes, call_prices, put_prices, synthetic_prices)
             if currenttime() > last_print_time + timedelta(seconds=5):
                 print(
                     f"{currenttime()} - {index} - {expiry}:\n"
-                    f"Minimum price: {min_price} at strike: {strikes[min_price_index]} Call Ask: {call_asks[min_price_index]} Put Bid: {put_bids[min_price_index]}\n"
-                    f"Maximum price: {max_price} at strike: {strikes[max_price_index]} Call Bid: {call_bids[max_price_index]} Put Ask: {put_asks[max_price_index]}\n"
+                    f"Minimum price: {min_price} at strike: {strikes[min_price_index]} "
+                    f"Call Ask: {call_asks[min_price_index]} Put Bid: {put_bids[min_price_index]}\n"
+                    f"Maximum price: {max_price} at strike: {strikes[max_price_index]} "
+                    f"Call Bid: {call_bids[max_price_index]} Put Ask: {put_asks[max_price_index]}\n"
                     f"Price difference: {max_price - min_price}\n"
                 )
                 last_print_time = currenttime()
@@ -802,8 +804,10 @@ class SyntheticArbSystem:
                 print(
                     f"**********Trade Identified at {currenttime()} on strike: Min {strikes[min_price_index]} "
                     f"and Max {strikes[max_price_index]}**********\n"
-                    f"Minimum price: {min_price} at strike: {strikes[min_price_index]} Call Ask: {call_asks[min_price_index]} Put Bid: {put_bids[min_price_index]}\n"
-                    f"Maximum price: {max_price} at strike: {strikes[max_price_index]} Call Bid: {call_bids[max_price_index]} Put Ask: {put_asks[max_price_index]}\n"
+                    f"Minimum price: {min_price} at strike: {strikes[min_price_index]} "
+                    f"Call Ask: {call_asks[min_price_index]} Put Bid: {put_bids[min_price_index]}\n"
+                    f"Maximum price: {max_price} at strike: {strikes[max_price_index]} "
+                    f"Call Bid: {call_bids[max_price_index]} Put Ask: {put_asks[max_price_index]}\n"
                     f"Price difference: {max_price - min_price}\n"
                 )
                 min_strike = strikes[min_price_index]
@@ -815,7 +819,6 @@ class SyntheticArbSystem:
                     qty_in_lots,
                     min_strike,
                     max_strike,
-                    sleep_interval=5,
                 )
 
             for i, strike in enumerate(strikes):
@@ -849,8 +852,12 @@ class SyntheticArbSystem:
                 put_ask_qty[i] = self.symbol_option_chains[index][expiry][strike][
                     "put_best_ask_qty"
                 ]
-            synthetic_buy_prices = strikes + call_asks - put_bids
-            synthetic_sell_prices = strikes + call_bids - put_asks
+            (
+                synthetic_buy_prices,
+                synthetic_sell_prices,
+            ) = return_both_side_synthetic_prices(
+                strikes, call_asks, put_bids, call_bids, put_asks
+            )
             min_price_index = np.argmin(synthetic_buy_prices)
             max_price_index = np.argmax(synthetic_sell_prices)
             min_price = synthetic_buy_prices[min_price_index]
@@ -863,7 +870,6 @@ class SyntheticArbSystem:
         qty_in_lots,
         buy_strike,
         sell_strike,
-        sleep_interval=1,
     ):
         ids_call_buy, ids_put_sell = place_synthetic_fut_order(
             index, buy_strike, expiry, "BUY", qty_in_lots, "MARKET"
@@ -873,7 +879,7 @@ class SyntheticArbSystem:
         )
         ids = np.concatenate((ids_call_buy, ids_put_sell, ids_call_sell, ids_put_buy))
 
-        sleep(sleep_interval)
+        sleep(1)
         statuses = lookup_and_return("orderbook", "orderid", ids, "status")
 
         if any(statuses == "rejected"):
@@ -1570,8 +1576,8 @@ class Index:
                     notification_url,
                 )
         elif (
-            timetoexpiry(self.current_expiry, effective_time=True, in_days=True) < 2
-        ):  # only exit
+            timetoexpiry(self.current_expiry, effective_time=True, in_days=True) < 1.5
+        ):  # only exit as expiry next day
             sell_strike = None
             notifier(
                 f"{self.name} Only exiting current position. IV: {iv}, Vix: {vix}.",
@@ -2664,33 +2670,25 @@ class Index:
             profit_if_call_sl = p_avg_price - (c_avg_price * (c_sl - 1))
             profit_if_put_sl = c_avg_price - (p_avg_price * (p_sl - 1))
             ctb_threshold = max(profit_if_call_sl, profit_if_put_sl)
+            ctb_call_strike = traded_strangle.call_strike + self.base
+            ctb_put_strike = traded_strangle.put_strike - self.base
+            ctb_hedge = Strangle(ctb_call_strike, ctb_put_strike, self.name, expiry)
 
-            def process_ctb(profit_threshold):
-                hedge_call_strike = traded_strangle.call_strike + self.base
-                hedge_put_strike = traded_strangle.put_strike + self.base
-                h_strangle = Strangle(
-                    hedge_call_strike, hedge_put_strike, self.name, expiry
-                )
+            def process_ctb(h_strangle):
+
                 hedge_total_ltp = h_strangle.fetch_total_ltp()
 
                 hedge_profit = (
                     info_dict["total_avg_price"] - hedge_total_ltp - self.base
                 )
 
-                logger.info(
-                    f"{self.name} CTB threshold: {profit_threshold}, Hedge working: {hedge_profit}"
-                )
-
-                if hedge_profit >= profit_threshold:
-                    return h_strangle
-                else:
-                    return None
+                return hedge_profit
 
             last_print_time = currenttime()
             last_log_time = currenttime()
             last_notify_time = currenttime()
-            print_interval = timedelta(seconds=5)
-            log_interval = timedelta(minutes=60)
+            print_interval = timedelta(seconds=10)
+            log_interval = timedelta(minutes=25)
             notify_interval = timedelta(minutes=180)
 
             while not info_dict["trade_complete"]:
@@ -2754,8 +2752,14 @@ class Index:
                     and not ctb_notification_sent
                 ):
                     try:
-                        ctb_hedge = process_ctb(ctb_threshold)
-                        if ctb_hedge is not None:
+                        ctb_hedge_profit = process_ctb(ctb_hedge)
+                        if currenttime() - last_log_time > log_interval:
+                            logger.info(
+                                f"{self.name} Conversion to butterfly profit: {ctb_hedge_profit}, "
+                                f"Conversion to butterfly threshold: {ctb_threshold}"
+                            )
+
+                        if ctb_hedge_profit >= ctb_threshold:
                             notifier(
                                 f"{self.name} Convert to butterfly triggered\n",
                                 notification_url,
@@ -3283,7 +3287,12 @@ class Index:
         refresh_book = True
 
         # Wait for exit time or both stop losses to hit (Main Loop)
-        while all([currenttime().time() < time(*exit_time)]):
+        while all(
+            [
+                currenttime().time() < time(*exit_time),
+                not any(shared_info_dict["exit_triggers"].values()),
+            ]
+        ):
             check_for_stop_loss(
                 shared_info_dict, "call", refresh_orderbook=refresh_book
             )
@@ -3297,7 +3306,7 @@ class Index:
             refresh_book = False
             sleep(1)
 
-        # Out of the while loop, so exit time reached or both stop losses hit
+        # Out of the while loop, so exit time reached or both stop losses hit, or we are hedged
 
         # If we are hedged then wait till exit time
         # noinspection PyTypeChecker
@@ -4818,8 +4827,7 @@ def timetoexpiry(expiry, effective_time=False, in_days=False):
         numer_of_weekdays = sum(date_range.dayofweek > 4)
         number_of_holidays = sum(date_range.isin(holidays))
         time_to_expiry -= (numer_of_weekdays + number_of_holidays) / 365
-        # print(f'Number of weekdays: {numer_of_weekdays} and number of holidays: {number_of_holidays}')
-    return round(time_to_expiry, 3) * multiplier
+    return round(time_to_expiry * multiplier, 5)
 
 
 def calculate_iv(opt_price, spot, strike, tte, opt_type):
