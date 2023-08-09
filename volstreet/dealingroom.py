@@ -294,14 +294,12 @@ class PriceFeed(SmartWebSocketV2):
                     if process_iv_log:
                         self.process_iv_log(
                             index,
-                            spot,
                             strike,
                             expiry,
                             call_iv,
                             put_iv,
                             avg_iv,
                             n_values,
-                            iv_threshold,
                         )
 
                 if market_depth:
@@ -333,14 +331,12 @@ class PriceFeed(SmartWebSocketV2):
     def process_iv_log(
         self,
         index,
-        spot,
         strike,
         expiry,
         call_iv,
         put_iv,
         avg_iv,
         n_values,
-        iv_threshold,
     ):
         if strike not in self.iv_log[index][expiry]:
             self.iv_log[index][expiry][strike] = {
@@ -366,20 +362,6 @@ class PriceFeed(SmartWebSocketV2):
         running_avg_put_iv = sum(put_ivs) / len(put_ivs) if put_ivs else None
         running_avg_total_iv = sum(total_ivs) / len(total_ivs) if total_ivs else None
 
-        self.check_and_notify_iv_spike(
-            call_iv,
-            running_avg_call_iv,
-            "Call",
-            index,
-            spot,
-            strike,
-            expiry,
-            iv_threshold,
-        )
-        self.check_and_notify_iv_spike(
-            put_iv, running_avg_put_iv, "Put", index, spot, strike, expiry, iv_threshold
-        )
-
         self.symbol_option_chains[index][expiry][strike].update(
             {
                 "running_avg_call_iv": running_avg_call_iv,
@@ -396,30 +378,6 @@ class PriceFeed(SmartWebSocketV2):
         put_ivs = [*filter(lambda x: x is not None, put_ivs)]
         total_ivs = [*filter(lambda x: x is not None, total_ivs)]
         return call_ivs, put_ivs, total_ivs
-
-    def check_and_notify_iv_spike(
-        self, iv, running_avg_iv, iv_type, idx, idx_price, K, exp, iv_hurdle
-    ):
-        not_in_the_money_by_100 = False
-
-        if iv_type == "Call":
-            not_in_the_money_by_100 = idx_price <= K - 100
-        elif iv_type == "Put":
-            not_in_the_money_by_100 = idx_price >= K + 100
-
-        if (
-            iv
-            and iv > iv_hurdle * running_avg_iv
-            and self.iv_log[idx][exp][K]["last_notified_time"]
-            < currenttime() - timedelta(minutes=5)
-            and not_in_the_money_by_100
-        ):
-            notifier(
-                f"{iv_type} IV for {idx} {K} greater than average.\nIV: {iv}\n"
-                f"Running Average: {running_avg_iv}",
-                self.webhook_url,
-            )
-            self.iv_log[idx][exp][K]["last_notified_time"] = currenttime()
 
 
 class SharedData:
@@ -449,7 +407,8 @@ class SharedData:
 class Option:
     def __init__(self, strike: int, option_type: str, underlying: str, expiry: str):
         self.strike = round(int(strike), 0)
-        self.option_type = option_type
+
+        self.option_type = "CE" if option_type.lower().startswith("c") else "PE"
         self.underlying = underlying
         self.expiry = expiry
         self.symbol, self.token = fetch_symbol_token(
@@ -886,6 +845,113 @@ class SyntheticArbSystem:
             logger.error(
                 f"Order rejected for {index} {expiry} {qty_in_lots} Buy {buy_strike} Sell {sell_strike}"
             )
+
+
+class IvArbitrageScanner:
+    def __init__(self, symbol_option_chains, iv_log):
+        self.symbol_option_chains = symbol_option_chains
+        self.iv_log = iv_log
+        self.trade_log = []
+
+    def scan_for_iv_arbitrage(
+        self, iv_hurdle=1.5, exit_time=(15, 25), notification_url=None
+    ):
+        while currenttime().time() < time(*exit_time):
+            for index in self.symbol_option_chains:
+                spot = self.symbol_option_chains[index].underlying_price
+                for expiry in self.symbol_option_chains[index]:
+                    for strike in self.symbol_option_chains[index][expiry]:
+                        option_to_check = "avg"
+
+                        # Check for IV spike
+                        if spot < strike + 100:
+                            option_to_check = "call"
+
+                        if spot > strike - 100:
+                            option_to_check = "put"
+
+                        try:
+                            opt_iv = self.symbol_option_chains[index][expiry][strike][
+                                f"{option_to_check}_iv"
+                            ]
+                            running_avg_opt_iv = self.symbol_option_chains[index][
+                                expiry
+                            ][strike][f"running_avg_{option_to_check}_iv"]
+                        except KeyError as e:
+                            print(f"KeyError {e} for {index} {expiry} {strike}")
+                            raise e
+
+                        self.check_iv_spike(
+                            opt_iv,
+                            running_avg_opt_iv,
+                            option_to_check.capitalize(),
+                            index,
+                            strike,
+                            expiry,
+                            iv_hurdle,
+                            notification_url,
+                        )
+
+    def check_iv_spike(
+        self,
+        iv,
+        running_avg_iv,
+        opt_type,
+        underlying,
+        strike,
+        expiry,
+        iv_hurdle,
+        notification_url,
+    ):
+        if opt_type == "Avg":
+            return
+
+        iv_hurdle = 1 + iv_hurdle
+        upper_iv_threshold = running_avg_iv * iv_hurdle
+        lower_iv_threshold = running_avg_iv / iv_hurdle
+
+        # print(
+        #    f"Checking {opt_type} IV for {underlying} {strike} {expiry}\nIV: {iv}\n"
+        #    f"Running Average: {running_avg_iv}\nUpper Threshold: {upper_iv_threshold}\n"
+        #    f"Lower Threshold: {lower_iv_threshold}"
+        # )
+
+        if iv and (iv > upper_iv_threshold or iv < lower_iv_threshold):
+            # Execute trade
+            signal = "BUY" if iv > upper_iv_threshold else "SELL"
+            # self.execute_iv_arbitrage_trade(
+            #     signal, underlying, strike, expiry, opt_type
+            # )
+
+            # Notify
+            if self.iv_log[underlying][expiry][strike][
+                "last_notified_time"
+            ] < currenttime() - timedelta(minutes=5):
+                notifier(
+                    f"{opt_type} IV for {underlying} {strike} {expiry} greater than average.\nIV: {iv}\n"
+                    f"Running Average: {running_avg_iv}",
+                    notification_url,
+                )
+                self.iv_log[underlying][expiry][strike][
+                    "last_notified_time"
+                ] = currenttime()
+
+    def execute_iv_arbitrage_trade(
+        self, signal, underlying, strike, expiry, option_type
+    ):
+        qty_in_lots = 1
+        option_to_trade = Option(strike, option_type, underlying, expiry)
+        order_ids = option_to_trade.place_order(signal, qty_in_lots, "MARKET")
+        self.trade_log.append(
+            {
+                "traded_option": option_to_trade,
+                "order_ids": order_ids,
+                "signal": signal,
+                "qty": qty_in_lots,
+                "order_type": "MARKET",
+                "time": currenttime(),
+            }
+        )
 
 
 class Index:
@@ -1472,6 +1538,57 @@ class Index:
             call_ltp,
             put_ltp,
         )
+
+    def most_resilient_strangle(self, expiry=None, strike_range=40, stop_loss=0.5):
+        def expected_movement(option: Option):
+            option_ltp = ltp_cache[option]
+            time_to_expiry = timetoexpiry(expiry)
+            stop_loss_price = (
+                (option_ltp * (1 + stop_loss))
+                if option.option_type == "CE"
+                else (option_ltp * (1 - stop_loss))
+            )
+            return bs.target_movement(
+                option.option_type,
+                option_ltp,
+                stop_loss_price,
+                spot_price,
+                option.strike,
+                time_to_expiry,
+            )
+
+        if expiry is None:
+            expiry = self.current_expiry
+
+        spot_price = self.fetch_ltp()
+        atm_strike = findstrike(spot_price, self.base)
+
+        strike_range = int(strike_range / 2)
+        strike_range = np.arange(
+            atm_strike - (self.base * strike_range),
+            atm_strike + (self.base * (strike_range + 1)),
+            self.base,
+        )
+        call_strike_range = strike_range[strike_range >= atm_strike]
+        put_strike_range = strike_range[strike_range <= atm_strike]
+        pairs = list(itertools.product(call_strike_range, put_strike_range))
+        strangles = [Strangle(pair[0], pair[1], self.name, expiry) for pair in pairs]
+        unique_call_options = list(
+            set([strangle.call_option for strangle in strangles])
+        )
+        unique_put_options = list(set([strangle.put_option for strangle in strangles]))
+        unique_call_options = sorted(unique_call_options, key=lambda x: x.strike)
+        unique_put_options = sorted(unique_put_options, key=lambda x: x.strike)
+        ltp_cache = {
+            option: option.fetch_ltp()
+            for option in unique_call_options + unique_put_options
+        }
+        expected_movements_call = map(expected_movement, unique_call_options)
+        expected_movements_put = map(expected_movement, unique_put_options)
+        expected_movements_call = [*zip(unique_call_options, expected_movements_call)]
+        expected_movements_put = [*zip(unique_put_options, expected_movements_put)]
+
+        return expected_movements_call, expected_movements_put
 
     @log_errors
     def rollover_overnight_short_straddle(
@@ -2924,11 +3041,11 @@ class Index:
                 )
             except OptionModelInputError:
                 estimated_movement = (
-                    0.0015 if side == "call" else -0.0015
+                    0.0022 if side == "call" else -0.0022  # Remove hard coded number
                 )  # Remove hard coded number
                 input_error_message = (
-                    f"OptionModelInputError in justify_stop_loss for {self.name} {side} strangle. "
-                    f"Setting estimated_movement to {estimated_movement}"
+                    f"OptionModelInputError in justify_stop_loss for {self.name} {side} strangle\n"
+                    f"Setting estimated_movement to {estimated_movement}\n"
                     f"Input flag: {side}, "
                     f"Input stop loss price: {info_dict.get(f'{side}_stop_loss_price')}, "
                     f"Input avg price: {info_dict.get(f'{side}_avg_price')}, "
