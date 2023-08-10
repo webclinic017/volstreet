@@ -850,6 +850,7 @@ class IvArbitrageScanner:
         self.iv_log = iv_log
         self.trade_log = []
 
+    @log_errors
     def scan_for_iv_arbitrage(
         self, iv_hurdle=1.5, exit_time=(15, 25), notification_url=None
     ):
@@ -1676,18 +1677,24 @@ class Index:
         call_iv, put_iv, iv = sell_straddle.ivs()
         iv = iv * 100 if iv is not None else None
         # This if-clause checks how far the expiry is
-        if weekend_in_expiry and iv is not None:  # far from expiry
-            if iv < vix * iv_threshold:
-                notifier(
-                    f"{self.name} IV is too low compared to VIX - IV: {iv}, Vix: {vix}.",
-                    notification_url,
-                )
-                return
+        if weekend_in_expiry:  # far from expiry
+            if iv is not None:
+                if iv < vix * iv_threshold:
+                    notifier(
+                        f"{self.name} IV is too low compared to VIX - IV: {iv}, Vix: {vix}.",
+                        notification_url,
+                    )
+                    return
+                else:
+                    notifier(
+                        f"{self.name} IV is fine compared to VIX - IV: {iv}, Vix: {vix}.",
+                        notification_url,
+                    )
             else:
                 notifier(
-                    f"{self.name} IV is fine compared to VIX - IV: {iv}, Vix: {vix}.",
-                    notification_url,
+                    f"{self.name} IV is None and weekend before expiry. Exiting. Vix: {vix}.",
                 )
+                return
         elif (
             timetoexpiry(self.current_expiry, effective_time=True, in_days=True) < 1.5
         ):  # only exit as expiry next day
