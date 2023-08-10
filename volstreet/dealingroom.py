@@ -225,7 +225,6 @@ class PriceFeed(SmartWebSocketV2):
         calculate_iv=True,
         stop_iv_calculation_hours=3,
         n_values=100,
-        iv_threshold=1.1,
     ):
         while currenttime().time() < time(*exit_time):
             indices = self.index_option_chains_subscribed
@@ -241,7 +240,6 @@ class PriceFeed(SmartWebSocketV2):
                         process_iv_log,
                         calculate_iv,
                         n_values,
-                        iv_threshold,
                         stop_iv_calculation_hours,
                     )
 
@@ -253,7 +251,6 @@ class PriceFeed(SmartWebSocketV2):
         process_iv_log: bool = False,
         calculate_iv: bool = False,
         n_values: int = 100,
-        iv_threshold: float = 1.1,
         stop_iv_calculation_hours: int = 3,
     ):
         parsed_dict = self.parse_price_dict()
@@ -918,7 +915,7 @@ class IvArbitrageScanner:
 
         if iv and (iv > upper_iv_threshold or iv < lower_iv_threshold):
             # Execute trade
-            signal = "BUY" if iv > upper_iv_threshold else "SELL"
+            # signal = "BUY" if iv > upper_iv_threshold else "SELL"
             # self.execute_iv_arbitrage_trade(
             #     signal, underlying, strike, expiry, opt_type
             # )
@@ -1677,10 +1674,9 @@ class Index:
             strike=sell_strike, underlying=self.name, expiry=self.current_expiry
         )
         call_iv, put_iv, iv = sell_straddle.ivs()
-        iv = iv * 100
-
+        iv = iv * 100 if iv is not None else None
         # This if-clause checks how far the expiry is
-        if weekend_in_expiry:  # far from expiry
+        if weekend_in_expiry and iv is not None:  # far from expiry
             if iv < vix * iv_threshold:
                 notifier(
                     f"{self.name} IV is too low compared to VIX - IV: {iv}, Vix: {vix}.",
