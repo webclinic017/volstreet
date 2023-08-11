@@ -4205,8 +4205,12 @@ def notifier(message, webhook_url=None):
 
 def check_and_notify_order_placement_statuses(
     statuses, target_status="complete", webhook_url=None, **kwargs
-):
-    order_prefix = f"{kwargs['order_tag']}: " if "order_tag" in kwargs else ""
+) -> str:
+    order_prefix = (
+        f"{kwargs['order_tag']}: "
+        if ("order_tag" in kwargs and kwargs["order_tag"])
+        else ""
+    )
     order_message = [f"{k}-{v}" for k, v in kwargs.items() if k != "order_tag"]
     order_message = ", ".join(order_message)
 
@@ -4215,19 +4219,25 @@ def check_and_notify_order_placement_statuses(
             f"{order_prefix}Order(s) placed successfully for {order_message}",
             webhook_url,
         )
+        return "all complete"
     elif all(statuses == "rejected"):
         notifier(f"{order_prefix}All orders rejected for {order_message}", webhook_url)
         raise Exception("Orders rejected")
+    elif all(statuses == "open"):
+        notifier(f"{order_prefix}All orders pending for {order_message}", webhook_url)
+        return "all open"
     elif any(statuses == "open"):
         notifier(
             f"{order_prefix}Some orders pending for {order_message}. You can modify the orders.",
             webhook_url,
         )
+        return "some open"
     elif any(statuses == "rejected"):
         notifier(
             f"{order_prefix}Some orders rejected for {order_message}.\nYou can place the rejected orders again.",
             webhook_url,
         )
+        return "some rejected"
     else:
         notifier(
             f"{order_prefix}ERROR. Order statuses uncertain for {order_message}",
@@ -4248,6 +4258,15 @@ def place_option_order_and_notify(
     return_avg_price: bool = True,
     **kwargs,
 ):
+    def return_avg_price_from_orderbook(orderbook, ids):
+        avg_prices = lookup_and_return(
+            orderbook, ["orderid", "status"], [ids, "complete"], "averageprice"
+        )
+        if avg_prices.size > 0:
+            return avg_prices.astype(float).mean()
+        else:
+            return None
+
     notify_dict = {
         "order_tag": order_tag,
         "Underlying": instrument.underlying,
@@ -4293,7 +4312,7 @@ def place_option_order_and_notify(
 
     order_book = fetch_book("orderbook")
     order_statuses_ = lookup_and_return(order_book, "orderid", order_ids, "status")
-    check_and_notify_order_placement_statuses(
+    placement_status = check_and_notify_order_placement_statuses(
         statuses=order_statuses_,
         target_status=target_status,
         webhook_url=webhook_url,
@@ -4301,24 +4320,29 @@ def place_option_order_and_notify(
     )
 
     if return_avg_price:
-        if call_order_ids and put_order_ids:
-            call_avg_price = (
-                lookup_and_return(order_book, "orderid", call_order_ids, "averageprice")
-                .astype(float)
-                .mean()
-            )
-            put_avg_price = (
-                lookup_and_return(order_book, "orderid", put_order_ids, "averageprice")
-                .astype(float)
-                .mean()
-            )
+        if call_order_ids and put_order_ids:  # Strangle/Straddle/SyntheticFuture
+            call_ltp, put_ltp = instrument.fetch_ltp()
+            if placement_status == "all open":
+                call_avg_price, put_avg_price = call_ltp, put_ltp
+            else:
+                call_avg_price = (
+                    return_avg_price_from_orderbook(order_book, call_order_ids)
+                    or call_ltp
+                )
+                put_avg_price = (
+                    return_avg_price_from_orderbook(order_book, put_order_ids)
+                    or put_ltp
+                )
+
             return call_avg_price, put_avg_price
-        else:
-            avg_price = (
-                lookup_and_return(order_book, "orderid", order_ids, "averageprice")
-                .astype(float)
-                .mean()
-            )
+        else:  # Option
+            ltp = instrument.fetch_ltp()
+            if placement_status == "all open":
+                avg_price = ltp
+            else:
+                avg_price = (
+                    return_avg_price_from_orderbook(order_book, order_ids) or ltp
+                )
             return avg_price
 
     return order_ids
@@ -5328,10 +5352,8 @@ def handle_open_orders(*order_ids, action, modify_percentage=0.01, stage=0):
             current_params = lookup_and_return(
                 order_book, "orderid", order_id, relevant_fields
             )
-            print(f"Current params for order {order_id}: {current_params}")
 
             old_price = current_params["price"]
-            print(f"Old price for order {order_id}: {old_price}")
 
             new_price = (
                 old_price * (1 + modify_percentage)
@@ -5339,15 +5361,15 @@ def handle_open_orders(*order_ids, action, modify_percentage=0.01, stage=0):
                 else old_price * (1 - modify_percentage)
             )
             new_price = custom_round(new_price)
-            print(f"New price for order {order_id}: {new_price}")
 
             modified_params = current_params.copy()
             modified_params["price"] = new_price
             modified_params.pop("status")
-            # print(f"Modified params for order {order_id}: {modified_params}")
 
             obj.modifyOrder(modified_params)
-            print(f"Modified order {order_id} with new price: {new_price}")
+            print(
+                f"Modified order {order_id} with new price: {new_price} from old price: {old_price}"
+            )
 
         order_book = fetch_book("orderbook")
         sleep(1)
@@ -5365,6 +5387,56 @@ def handle_open_orders(*order_ids, action, modify_percentage=0.01, stage=0):
             )
 
         print("All orders are now complete or closed, exiting function")
+
+
+def handle_open_orders_lite(*order_ids, orderbook, action, modify_percentage=0.02):
+    """Modifies orders if they are pending by the provided modification percentage"""
+
+    iterations = 0.1 / modify_percentage
+    iterations = int(iterations)
+    iterations = max(iterations, 1)
+
+    relevant_fields = [
+        "orderid",
+        "variety",
+        "symboltoken",
+        "price",
+        "ordertype",
+        "producttype",
+        "exchange",
+        "tradingsymbol",
+        "quantity",
+        "duration",
+        "status",
+    ]
+
+    order_params = {
+        order_id: lookup_and_return(orderbook, "orderid", order_id, relevant_fields)
+        for order_id in order_ids
+    }
+
+    for i in range(iterations):
+        for order_id in order_ids:
+            old_price = order_params[order_id]["price"]
+
+            increment = old_price * modify_percentage
+            increment = max(increment, 0.1)
+            new_price = (
+                old_price + increment if action == "BUY" else old_price - increment
+            )
+
+            new_price = custom_round(new_price)
+
+            modified_params = order_params[order_id].copy()
+            modified_params["price"] = new_price
+            order_params[order_id]["price"] = new_price
+            modified_params.pop("status")
+
+            obj.modifyOrder(modified_params)
+
+            print(
+                f"Modified order {order_id} with new price: {new_price} from old price: {old_price}"
+            )
 
 
 def cancel_pending_orders(order_ids, variety="STOPLOSS"):
