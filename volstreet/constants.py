@@ -3,6 +3,9 @@ import requests
 import pandas as pd
 import logging
 from datetime import datetime
+import os
+import joblib
+import ast
 
 
 def get_ticker_file():
@@ -44,6 +47,16 @@ def get_symbols():
     return df
 
 
+def load_rf_models():
+    random_forest_models = {}
+    for file in os.listdir("iv_models"):
+        if file.endswith(".joblib"):
+            str_literal = file.split("_")[-1].rstrip(".joblib")
+            segment = ast.literal_eval(str_literal)
+            random_forest_models[segment] = joblib.load(f"iv_models/{file}")
+    return random_forest_models
+
+
 def create_logger(name):
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
@@ -65,15 +78,25 @@ def create_logger(name):
     return logger
 
 
+# Get the list of scrips
 scrips = get_ticker_file()
-holidays = fetch_holidays()
-symbol_df = get_symbols()
-
 scrips["expiry_dt"] = pd.to_datetime(
     scrips[scrips.expiry != ""]["expiry"], format="%d%b%Y"
 )
 scrips["expiry_formatted"] = scrips["expiry_dt"].dt.strftime("%d%b%y")
 scrips["expiry_formatted"] = scrips["expiry_formatted"].str.upper()
+
+# Create a dictionary of token and symbol
 token_symbol_dict = dict(zip(scrips["token"], scrips["symbol"]))
 
+# Get the list of holidays
+holidays = fetch_holidays()
+
+# Get the list of symbols
+symbol_df = get_symbols()
+
+# Load the iv models
+iv_models = load_rf_models()
+
+# Create logger
 logger = create_logger("volstreet")

@@ -926,7 +926,7 @@ class IvArbitrageScanner:
                 "last_notified_time"
             ] < currenttime() - timedelta(minutes=5):
                 notifier(
-                    f"{opt_type} IV for {underlying} {strike} {expiry} greater than average.\nIV: {iv}\n"
+                    f"{opt_type} IV for {underlying} {strike} {expiry} different from average.\nIV: {iv}\n"
                     f"Running Average: {running_avg_iv}",
                     notification_url,
                 )
@@ -1537,23 +1537,131 @@ class Index:
             put_ltp,
         )
 
-    def most_resilient_strangle(self, expiry=None, strike_range=40, stop_loss=0.5):
+    @time_the_function
+    def most_equal_strangle(
+        self,
+        call_strike_offset=0,
+        put_strike_offset=0,
+        disparity_threshold=np.inf,
+        exit_time=time(15, 25),
+        range_of_strikes=4,
+        expiry=None,
+    ) -> Strangle | None:
+        def get_range_of_strangles(c_strike, p_strike, exp, strike_range):
+            if strike_range % 2 != 0:
+                strike_range += 1
+            c_strike_range = np.arange(
+                c_strike - (strike_range / 2) * self.base,
+                c_strike + (strike_range / 2) * self.base + self.base,
+                self.base,
+            )
+            if c_strike == p_strike:
+                return [Straddle(strike, self.name, exp) for strike in c_strike_range]
+            else:
+                p_strike_ranges = np.arange(
+                    p_strike - (strike_range / 2) * self.base,
+                    p_strike + (strike_range / 2) * self.base + self.base,
+                    self.base,
+                )
+                pairs = itertools.product(c_strike_range, p_strike_ranges)
+                return [Strangle(pair[0], pair[1], self.name, exp) for pair in pairs]
+
+        if expiry is None:
+            expiry = self.current_expiry
+
+        underlying_ltp = self.fetch_ltp()
+        temp_call_strike = underlying_ltp * (1 + call_strike_offset)
+        temp_put_strike = underlying_ltp * (1 - put_strike_offset)
+        temp_call_strike = findstrike(temp_call_strike, self.base)
+        temp_put_strike = findstrike(temp_put_strike, self.base)
+
+        strangles = get_range_of_strangles(
+            temp_call_strike, temp_put_strike, expiry, range_of_strikes
+        )
+        logger.info(f"{self.name} prospective strangles: {strangles}")
+
+        # Create a set of all distinct options
+        options = set(
+            option
+            for strangle in strangles
+            for option in (strangle.call_option, strangle.put_option)
+        )
+
+        # Define the price disparity function
+        def price_disparity(strangle):
+            call_ltp = ltp_cache[strangle.call_option]
+            put_ltp = ltp_cache[strangle.put_option]
+            return abs(call_ltp - put_ltp) / min(call_ltp, put_ltp)
+
+        tracked_strangle = None
+
+        while currenttime().time() < exit_time:
+            # If there's no tracked strangle update all prices and find the most equal strangle
+            if tracked_strangle is None:
+                ltp_cache = {option: option.fetch_ltp() for option in options}
+                most_equal, min_disparity = min(
+                    ((s, price_disparity(s)) for s in strangles), key=lambda x: x[1]
+                )
+                if min_disparity < 0.10:
+                    tracked_strangle = most_equal
+
+            # If there's a tracked strangle, check its disparity
+            else:
+                ltp_cache = {
+                    tracked_strangle.call_option: tracked_strangle.call_option.fetch_ltp(),
+                    tracked_strangle.put_option: tracked_strangle.put_option.fetch_ltp(),
+                }
+                most_equal = tracked_strangle
+                min_disparity = price_disparity(tracked_strangle)
+                if min_disparity >= 0.10:
+                    tracked_strangle = None
+
+            logger.info(
+                f"Most equal strangle: {most_equal} with disparity {min_disparity} "
+                f"and prices {ltp_cache[most_equal.call_option]} and {ltp_cache[most_equal.put_option]}"
+            )
+            logger.info(f"Most equal ltp cache: {ltp_cache}")
+            # If the lowest disparity is below the threshold, return the most equal strangle
+            if min_disparity < disparity_threshold:
+                return most_equal
+            else:
+                pass
+
+        else:
+            return None
+
+    @time_the_function
+    def most_resilient_strangle(
+        self,
+        strike_range=40,
+        stop_loss=1.5,
+        time_delta_minutes=60,
+        expiry=None,
+        extra_buffer=1.07,
+    ) -> Strangle:
         def expected_movement(option: Option):
             option_ltp = ltp_cache[option]
             time_to_expiry = timetoexpiry(expiry)
-            stop_loss_price = (
-                (option_ltp * (1 + stop_loss))
-                if option.option_type == "CE"
-                else (option_ltp * (1 - stop_loss))
-            )
+            stop_loss_price = option_ltp * stop_loss
             return bs.target_movement(
-                option.option_type,
-                option_ltp,
-                stop_loss_price,
-                spot_price,
-                option.strike,
-                time_to_expiry,
+                flag=option.option_type,
+                starting_price=option_ltp,
+                target_price=stop_loss_price,
+                starting_spot=spot_price,
+                strike=option.strike,
+                time_left=time_to_expiry,
+                time_delta_minutes=time_delta_minutes,
+                symbol=self.name,
             )
+
+        def find_favorite_strike(expected_moves, options, benchmark_movement):
+            for i in range(1, len(expected_moves)):
+                if (  # Remove hardcoded 20% buffer
+                    expected_moves[i] > benchmark_movement * extra_buffer
+                    and expected_moves[i] > expected_moves[i - 1]
+                ):
+                    return options[i]
+            return None
 
         if expiry is None:
             expiry = self.current_expiry
@@ -1561,32 +1669,77 @@ class Index:
         spot_price = self.fetch_ltp()
         atm_strike = findstrike(spot_price, self.base)
 
-        strike_range = int(strike_range / 2)
+        half_range = int(strike_range / 2)
         strike_range = np.arange(
-            atm_strike - (self.base * strike_range),
-            atm_strike + (self.base * (strike_range + 1)),
+            atm_strike - (self.base * half_range),
+            atm_strike + (self.base * (half_range + 1)),
             self.base,
         )
-        call_strike_range = strike_range[strike_range >= atm_strike]
-        put_strike_range = strike_range[strike_range <= atm_strike]
-        pairs = list(itertools.product(call_strike_range, put_strike_range))
-        strangles = [Strangle(pair[0], pair[1], self.name, expiry) for pair in pairs]
-        unique_call_options = list(
-            set([strangle.call_option for strangle in strangles])
-        )
-        unique_put_options = list(set([strangle.put_option for strangle in strangles]))
-        unique_call_options = sorted(unique_call_options, key=lambda x: x.strike)
-        unique_put_options = sorted(unique_put_options, key=lambda x: x.strike)
+
+        options_by_type = {
+            "CE": [
+                Option(
+                    strike=strike, option_type="CE", underlying=self.name, expiry=expiry
+                )
+                for strike in strike_range
+                if strike >= atm_strike
+            ],
+            "PE": [
+                Option(
+                    strike=strike, option_type="PE", underlying=self.name, expiry=expiry
+                )
+                for strike in strike_range[::-1]
+                if strike <= atm_strike
+            ],
+        }
+
         ltp_cache = {
             option: option.fetch_ltp()
-            for option in unique_call_options + unique_put_options
+            for option_type in options_by_type
+            for option in options_by_type[option_type]
         }
-        expected_movements_call = map(expected_movement, unique_call_options)
-        expected_movements_put = map(expected_movement, unique_put_options)
-        expected_movements_call = [*zip(unique_call_options, expected_movements_call)]
-        expected_movements_put = [*zip(unique_put_options, expected_movements_put)]
 
-        return expected_movements_call, expected_movements_put
+        expected_movements = {
+            option_type: [expected_movement(option) for option in options]
+            for option_type, options in options_by_type.items()
+        }
+
+        expected_movements_ce = np.array(expected_movements["CE"])
+        expected_movements_pe = np.array(expected_movements["PE"])
+        expected_movements_pe = abs(expected_movements_pe)
+
+        benchmark_movement_ce = expected_movements_ce[0]
+        benchmark_movement_pe = expected_movements_pe[0]
+
+        logger.info(
+            f"{self.name} - Call options' expected movements: {list(zip(options_by_type['CE'], expected_movements_ce))}"
+        )
+        logger.info(
+            f"{self.name} - Put options' expected movements:{list(zip(options_by_type['PE'], expected_movements_pe))}"
+        )
+
+        favorite_strike_ce = (
+            find_favorite_strike(
+                expected_movements_ce,
+                options_by_type["CE"],
+                benchmark_movement_ce,
+            )
+            or options_by_type["CE"][0]
+        )  # If no favorite strike, use ATM strike
+        favorite_strike_pe = (
+            find_favorite_strike(
+                expected_movements_pe,
+                options_by_type["PE"],
+                benchmark_movement_pe,
+            )
+            or options_by_type["PE"][0]
+        )  # If no favorite strike, use ATM strike
+
+        ce_strike = favorite_strike_ce.strike
+        pe_strike = favorite_strike_pe.strike
+        strangle = Strangle(ce_strike, pe_strike, self.name, expiry)
+
+        return strangle
 
     @log_errors
     def rollover_overnight_short_straddle(
@@ -2709,6 +2862,7 @@ class Index:
         quantity_in_lots,
         call_strike_offset=0,
         put_strike_offset=0,
+        strike_selection="equal",
         stop_loss="dynamic",
         call_stop_loss=None,
         put_stop_loss=None,
@@ -2730,6 +2884,8 @@ class Index:
         ----------
         quantity_in_lots : int
             Quantity in lots
+        strike_selection : str, optional {'equal', 'resilient'}
+            Mode for finding the strangle, by default 'equal'
         call_strike_offset : float, optional
             Call strike offset in percentage terms, by default 0
         put_strike_offset : float, optional
@@ -2920,25 +3076,6 @@ class Index:
                     last_notify_time = currenttime()
                 sleep(sleep_time)
 
-        def get_range_of_strangles(c_strike, p_strike, exp, range_of_strikes=4):
-            if range_of_strikes % 2 != 0:
-                range_of_strikes += 1
-            c_strike_range = np.arange(
-                c_strike - (range_of_strikes / 2) * self.base,
-                c_strike + (range_of_strikes / 2) * self.base + self.base,
-                self.base,
-            )
-            if c_strike == p_strike:
-                return [Straddle(strike, self.name, exp) for strike in c_strike_range]
-            else:
-                p_strike_ranges = np.arange(
-                    p_strike - (range_of_strikes / 2) * self.base,
-                    p_strike + (range_of_strikes / 2) * self.base + self.base,
-                    self.base,
-                )
-                pairs = itertools.product(c_strike_range, p_strike_ranges)
-                return [Strangle(pair[0], pair[1], self.name, exp) for pair in pairs]
-
         @log_errors
         def trend_catcher(info_dict, sl_type, qty_ratio, sl, strike_offset):
             offset = 1 - strike_offset if sl_type == "call" else 1 + strike_offset
@@ -3032,20 +3169,20 @@ class Index:
             time_delta = int(time_delta)
             try:
                 estimated_movement = bs.target_movement(
-                    side,
-                    info_dict.get(f"{side}_avg_price"),
-                    info_dict.get(f"{side}_stop_loss_price"),
-                    entry_spot,
-                    info_dict.get("traded_strangle").call_strike
+                    flag=side,
+                    starting_price=info_dict.get(f"{side}_avg_price"),
+                    target_price=info_dict.get(f"{side}_stop_loss_price"),
+                    starting_spot=entry_spot,
+                    strike=info_dict.get("traded_strangle").call_strike
                     if side == "call"
                     else info_dict.get("traded_strangle").put_strike,
-                    time_left_day_start,
-                    time_delta,
+                    time_left=time_left_day_start,
+                    time_delta_minutes=time_delta,
                 )
             except OptionModelInputError:
                 estimated_movement = (
                     0.0022 if side == "call" else -0.0022  # Remove hard coded number
-                )  # Remove hard coded number
+                )
                 input_error_message = (
                     f"OptionModelInputError in justify_stop_loss for {self.name} {side} strangle\n"
                     f"Setting estimated_movement to {estimated_movement}\n"
@@ -3056,6 +3193,17 @@ class Index:
                 )
                 logger.error(input_error_message)
                 notifier(input_error_message, notification_url)
+            except Exception as e:
+                estimated_movement = (
+                    0.0022 if side == "call" else -0.0022  # Remove hard coded number
+                )
+                error_message = (
+                    f"Error in justify_stop_loss for {self.name} {side} strangle\n"
+                    f"Setting estimated_movement to {estimated_movement}\n"
+                    f"Error: {e}"
+                )
+                logger.error(error_message)
+                notifier(error_message, notification_url)
 
             actual_movement = (current_spot - entry_spot) / entry_spot
             difference_in_sign = np.sign(estimated_movement) != np.sign(actual_movement)
@@ -3089,7 +3237,10 @@ class Index:
                 stop_loss_triggered = avg_price > stop_loss_price
                 if stop_loss_triggered:
                     stop_loss_justified = justify_stop_loss(info_dict, side)
-                    if stop_loss_justified:
+                    price_increase = avg_price / stop_loss_price
+                    if (
+                        stop_loss_justified or price_increase > 1.8
+                    ):  # Remove hard coded safety number
                         info_dict[f"{side}_sl"] = True
 
             else:  # If stop loss order ids are provided
@@ -3236,33 +3387,48 @@ class Index:
         # Setting strikes and expiry
         order_tag = "Intraday strangle"
         underlying_ltp = self.fetch_ltp()
-        temp_call_strike = underlying_ltp * (1 + call_strike_offset)
-        temp_put_strike = underlying_ltp * (1 - put_strike_offset)
-        temp_call_strike = findstrike(temp_call_strike, self.base)
-        temp_put_strike = findstrike(temp_put_strike, self.base)
+
         expiry = self.current_expiry
 
-        prospective_strangles = get_range_of_strangles(
-            temp_call_strike, temp_put_strike, expiry, range_of_strikes=4
-        )
-        logger.info(f"{self.name} prospective strangles: {prospective_strangles}")
+        # Setting stop loss
+        stop_loss_dict = {
+            "fixed": {"BANKNIFTY": 1.7, "NIFTY": 1.5},
+            "dynamic": {"BANKNIFTY": 1.7, "NIFTY": 1.5},
+        }
+
+        if isinstance(stop_loss, str):
+            if stop_loss == "dynamic" and timetoexpiry(expiry, in_days=True) < 1:
+                stop_loss = 1.7
+            else:
+                stop_loss = stop_loss_dict[stop_loss].get(self.name, 1.6)
+        else:
+            stop_loss = stop_loss
+
+        if strike_selection == "equal":
+            strangle = self.most_equal_strangle(
+                call_strike_offset=call_strike_offset,
+                put_strike_offset=put_strike_offset,
+                disparity_threshold=disparity_threshold,
+                exit_time=(
+                    datetime.combine(datetime.now().date(), time(*exit_time))
+                    - timedelta(minutes=5)
+                ).time(),
+                expiry=expiry,
+            )
+            if strangle is None:
+                notifier(
+                    f"{self.name} no strangle found within disparity threshold {disparity_threshold}",
+                    notification_url,
+                )
+                return
+        elif strike_selection == "resilient":
+            strangle = self.most_resilient_strangle(stop_loss=stop_loss, expiry=expiry)
+        else:
+            raise ValueError(f"Invalid find mode: {strike_selection}")
+
+        call_ltp, put_ltp = strangle.fetch_ltp()
 
         # Placing the main order
-        strangle = most_equal_strangle(
-            *prospective_strangles,
-            disparity_threshold=disparity_threshold,
-            exit_time=(
-                datetime.combine(datetime.now().date(), time(*exit_time))
-                - timedelta(minutes=5)
-            ).time(),
-        )
-        if strangle is None:
-            notifier(
-                f"{self.name} no strangle found within disparity threshold {disparity_threshold}",
-                notification_url,
-            )
-            return
-        call_ltp, put_ltp = strangle.fetch_ltp()
         call_avg_price, put_avg_price = place_option_order_and_notify(
             strangle,
             "SELL",
@@ -3281,20 +3447,6 @@ class Index:
             put_ltp if np.isnan(put_avg_price) or put_avg_price == 0 else put_avg_price
         )
         total_avg_price = call_avg_price + put_avg_price
-
-        # Setting stop loss
-        stop_loss_dict = {
-            "fixed": {"BANKNIFTY": 1.7, "NIFTY": 1.5},
-            "dynamic": {"BANKNIFTY": 1.7, "NIFTY": 1.5},
-        }
-
-        if isinstance(stop_loss, str):
-            if stop_loss == "dynamic" and timetoexpiry(expiry, in_days=True) < 1:
-                stop_loss = 1.7
-            else:
-                stop_loss = stop_loss_dict[stop_loss].get(self.name, 1.6)
-        else:
-            stop_loss = stop_loss
 
         call_stop_loss_price = (
             call_avg_price * call_stop_loss
@@ -5046,59 +5198,6 @@ def calc_greeks(position_string, position_price, underlying_price):
     gamma = bs.gamma(underlying_price, strike, time_left, 0.05, iv)
 
     return iv, delta, gamma
-
-
-@time_the_function
-def most_equal_strangle(*strangles, disparity_threshold=np.inf, exit_time=time(15, 25)):
-    # Create a set of all distinct options
-    options = set(
-        option
-        for strangle in strangles
-        for option in (strangle.call_option, strangle.put_option)
-    )
-
-    # Define the price disparity function
-    def price_disparity(strangle):
-        call_ltp = ltp_cache[strangle.call_option]
-        put_ltp = ltp_cache[strangle.put_option]
-        return abs(call_ltp - put_ltp) / min(call_ltp, put_ltp)
-
-    tracked_strangle = None
-
-    while currenttime().time() < exit_time:
-        # If there's no tracked strangle update all prices and find the most equal strangle
-        if tracked_strangle is None:
-            ltp_cache = {option: option.fetch_ltp() for option in options}
-            most_equal, min_disparity = min(
-                ((s, price_disparity(s)) for s in strangles), key=lambda x: x[1]
-            )
-            if min_disparity < 0.10:
-                tracked_strangle = most_equal
-
-        # If there's a tracked strangle, check its disparity
-        else:
-            ltp_cache = {
-                tracked_strangle.call_option: tracked_strangle.call_option.fetch_ltp(),
-                tracked_strangle.put_option: tracked_strangle.put_option.fetch_ltp(),
-            }
-            most_equal = tracked_strangle
-            min_disparity = price_disparity(tracked_strangle)
-            if min_disparity >= 0.10:
-                tracked_strangle = None
-
-        logger.info(
-            f"Most equal strangle: {most_equal} with disparity {min_disparity} "
-            f"and prices {ltp_cache[most_equal.call_option]} and {ltp_cache[most_equal.put_option]}"
-        )
-        logger.info(f"Most equal ltp cache: {ltp_cache}")
-        # If the lowest disparity is below the threshold, return the most equal strangle
-        if min_disparity < disparity_threshold:
-            return most_equal
-        else:
-            pass
-
-    else:
-        return None
 
 
 def get_current_vix():

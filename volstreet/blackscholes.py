@@ -4,6 +4,7 @@ import numpy as np
 import logging
 from datetime import datetime
 from volstreet.exceptions import OptionModelInputError
+from volstreet.constants import iv_models
 
 bs_logger = logging.getLogger("blackscholes")
 today = datetime.now().strftime("%Y-%m-%d")
@@ -195,6 +196,36 @@ def test_func():
     )
 
 
+def get_iv_model_for_time_to_expiry(time_to_expiry):
+    # Filtering the models based on the time to expiry
+    filtered_model = [*filter(lambda x: x[0] <= time_to_expiry < x[1], iv_models)][0]
+    # Returning the model for the segment
+    return iv_models[filtered_model]
+
+
+def iv_multiple_to_atm(time_to_expiry, spot, strike, symbol="NIFTY"):
+    iv_model = get_iv_model_for_time_to_expiry(time_to_expiry)
+    distance = (strike / spot) - 1
+    distance_squared = distance**2
+    moneyness = spot / strike
+    distance_time_interaction = distance_squared * time_to_expiry
+    finnifty = True if symbol.upper() == "FINNIFTY" else False
+    nifty = True if symbol.upper() == "NIFTY" else False
+
+    return iv_model.predict(
+        [
+            [
+                distance,
+                distance_squared,
+                moneyness,
+                distance_time_interaction,
+                finnifty,
+                nifty,
+            ]
+        ]
+    )[0]
+
+
 def iv_transformer_coeffs(tte):
     adjuster = 3 if tte < (0.8 / 365) else 1
     dfs2 = 1 / ((tte**1.2) * adjuster)
@@ -235,7 +266,9 @@ def iv_curve_adjustor(
     iv: int | tuple = 1,
     spot=100,
     strike=100,
-    _print_details=False,
+    symbol="NIFTY",
+    time_delta_minutes=None,
+    print_details=False,
 ):
     """
     This function returns the adjusted implied volatility accounting for the curve effect.
@@ -244,29 +277,76 @@ def iv_curve_adjustor(
     :param iv: implied volatility of the strike
     :param spot: spot price
     :param strike: strike price
-    :param _print_details: print details of the adjustment
+    :param symbol: symbol for rhe random forest model
+    :param time_delta_minutes: time delta in minutes
+    :param print_details: print details of the adjustment
     :return: adjusted implied volatility for the strike after the movement
     """
 
-    coefs = iv_transformer_coeffs_wip(time_to_expiry)
-    current_diff = strike / spot - 1
-    current_iv_multiple = (
-        coefs[0] * current_diff**2 + coefs[1] * current_diff + coefs[2]
+    def get_iv_multiple_to_atm(tte, s, k, sym, distance):
+        try:
+            # Model the IV curve using the random forest models
+            return iv_multiple_to_atm(tte, s, k, sym)
+        except Exception as e:
+            bs_logger.error(
+                f"Error in iv_multiple_to_atm: {e}, time_to_expiry={tte}, spot={s}, strike={k}, symbol={sym}"
+            )
+
+            # Get the regression coefficients for the IV curve
+            coeffs = iv_transformer_coeffs_wip(tte)
+
+            # Apply the IV curve model to the current displacement
+            return coeffs[0] * distance**2 + coeffs[1] * distance + coeffs[2]
+
+    # Calculate the current displacement from ATM
+    current_displacement = strike / spot - 1
+
+    # Calculate the new spot price after the movement
+    new_spot = spot * (1 + movement)
+
+    # Calculate the new displacement from ATM
+    total_displacement = strike / new_spot - 1
+
+    # Get the IV multiple for the current displacement
+    current_iv_multiple = get_iv_multiple_to_atm(
+        time_to_expiry, spot, strike, symbol, current_displacement
     )
+
+    # Normalize the given IV to the ATM level by dividing by the current IV multiple
     atm_iv = iv / current_iv_multiple
 
-    new_spot = spot * (1 + movement)
-    total_displacement = strike / new_spot - 1
-    premium_to_atm_iv = (
-        coefs[0] * total_displacement**2 + coefs[1] * total_displacement + coefs[2]
+    # New time to expiry after the movement
+    new_time_to_expiry = (
+        time_to_expiry - (time_delta_minutes / 525600)
+        if time_delta_minutes
+        else time_to_expiry
     )
-    new_iv = atm_iv * premium_to_atm_iv
 
-    if _print_details:
+    if new_time_to_expiry < 0.000001:
+        new_time_to_expiry = 0.000001
+
+    # Apply the IV curve model to the new displacement
+    premium_to_atm_iv = get_iv_multiple_to_atm(
+        new_time_to_expiry, new_spot, strike, symbol, total_displacement
+    )
+
+    if (
+        new_time_to_expiry < 0.0008
+    ):  # On expiry day we need to adjust the vol as iv increases steadily as we approach expiry
+        vol_multiple = 1 + (time_delta_minutes / 375)
+        new_atm_iv = atm_iv * vol_multiple
+    else:
+        new_atm_iv = atm_iv
+
+    # Scale the normalized ATM IV by the premium to get the new IV
+    new_iv = new_atm_iv * premium_to_atm_iv
+
+    if print_details:
         print(
-            f"New iv: {new_iv} for strike {strike} spot {new_spot} "
-            f"iv {iv} atm_iv {atm_iv} movement {movement} "
-            f"time_to_expiry {time_to_expiry}"
+            f"New IV: {new_iv} for Strike: {strike}\n"
+            f"Starting IV: {iv}, ATM IV: {atm_iv}\nMovement {movement}\n"
+            f"Spot after move: {new_spot}\n"
+            f"Time to expiry: {new_time_to_expiry} from {time_to_expiry}"
         )
 
     return new_iv
@@ -274,74 +354,74 @@ def iv_curve_adjustor(
 
 def target_movement(
     flag,
-    current_price,
+    starting_price,
     target_price,
-    current_spot,
+    starting_spot,
     strike,
-    timeleft,
-    time_delta=None,
-    _print_details=False,
+    time_left,
+    time_delta_minutes=None,
+    symbol="NIFTY",
+    print_details=False,
 ):
     """
     :param flag: 'c' or 'p'
-    :param current_price: current price of the option
+    :param starting_price: current price of the option
     :param target_price: target price of the option
-    :param current_spot: current spot price
+    :param starting_spot: current spot price
     :param strike: strike price
-    :param timeleft: time left to expiry in years
-    :param time_delta: in minutes
-    :param _print_details: print details of the adjustment
+    :param time_left: time left to expiry in years
+    :param time_delta_minutes: time delta in minutes
+    :param print_details: print details of the adjustment
+    :param symbol: symbol for the random forest model
     :return:
     """
     flag = flag.lower()[0]
-    strike_diff = current_spot - strike if flag == "c" else strike - current_spot
-    if strike_diff > current_price:
+    strike_diff = starting_spot - strike if flag == "c" else strike - starting_spot
+    if strike_diff > starting_price:
         raise OptionModelInputError(
-            f"Current price {current_price} of {'call' if flag == 'c' else 'put'} is less than the strike difference"
+            f"Current price {starting_price} of {'call' if flag == 'c' else 'put'} is less than the strike difference"
         )
     price_func = call if flag == "c" else put
-    vol = implied_volatility(current_price, current_spot, strike, timeleft, 0.06, flag)
-    delta_ = delta(current_spot, strike, timeleft, 0.06, vol, flag)
-    estimated_movement_points = (target_price - current_price) / delta_
-    estimated_movement = estimated_movement_points / current_spot
-    timeleft = timeleft - (time_delta / 525600) if time_delta else timeleft
-
-    if (
-        timeleft < 0.0008
-    ):  # On expiry day we need to adjust the vol as iv increases steadily as we approach expiry
-        vol_multiple = 2 - (1401.74 * timeleft)
-        vol = vol * vol_multiple
+    vol = implied_volatility(
+        starting_price, starting_spot, strike, time_left, 0.06, flag
+    )
+    new_time_left = (
+        time_left - (time_delta_minutes / 525600) if time_delta_minutes else time_left
+    )
+    delta_ = delta(starting_spot, strike, new_time_left, 0.06, vol, flag)
+    estimated_movement_points = (target_price - starting_price) / delta_
+    estimated_movement = estimated_movement_points / starting_spot
 
     modified_vol = iv_curve_adjustor(
         estimated_movement,
-        timeleft,
+        time_left,
         iv=vol,
-        spot=current_spot,
+        spot=starting_spot,
         strike=strike,
-        _print_details=_print_details,
+        symbol=symbol,
+        time_delta_minutes=time_delta_minutes,
+        print_details=print_details,
     )
 
-    if _print_details:
-        print(
-            f"estimated movement: {estimated_movement}, vol: {vol}, modified vol: {modified_vol}"
-        )
+    f = (
+        lambda s1: price_func(s1, strike, new_time_left, 0.06, modified_vol)
+        - target_price
+    )
 
-    f = lambda s1: price_func(s1, strike, timeleft, 0.06, modified_vol) - target_price
-
-    if target_price > current_price:
+    if target_price > starting_price:
         if flag == "c":
-            a = current_spot
-            b = 2 * current_spot
+            a = starting_spot
+            b = 2 * starting_spot
         else:
             a = 0.05
-            b = current_spot
+            b = starting_spot
     else:
         if flag == "c":
             a = 0.05
-            b = current_spot
+            b = starting_spot
         else:
-            a = current_spot
-            b = 2 * current_spot
+            a = starting_spot
+            b = 2 * starting_spot
 
     target_spot = brentq(
         f, a=a, b=b, xtol=1e-15, rtol=1e-15, maxiter=1000, full_output=False
@@ -349,6 +429,6 @@ def target_movement(
 
     assert isinstance(target_spot, float)
 
-    movement = (target_spot / current_spot) - 1
+    movement = (target_spot / starting_spot) - 1
 
     return movement
