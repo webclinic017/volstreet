@@ -3,9 +3,10 @@ import requests
 import pandas as pd
 import logging
 from datetime import datetime
-import os
 import joblib
 import ast
+from importlib.resources import files
+from pathlib import Path
 
 
 def get_ticker_file():
@@ -48,12 +49,20 @@ def get_symbols():
 
 
 def load_rf_models():
+    resource_path = files("volstreet").joinpath("iv_models")
+
+    # noinspection PyTypeChecker
+    data_path = Path(resource_path)
+    joblib_files = [f for f in data_path.glob("*.joblib")]
+
     random_forest_models = {}
-    for file in os.listdir("iv_models"):
-        if file.endswith(".joblib"):
-            str_literal = file.split("_")[-1].rstrip(".joblib")
-            segment = ast.literal_eval(str_literal)
-            random_forest_models[segment] = joblib.load(f"iv_models/{file}")
+
+    for file in joblib_files:
+        str_literal = file.name.split("_")[-1].rstrip(".joblib")
+        segment = ast.literal_eval(str_literal)
+        with open(file, "rb") as f:
+            model = joblib.load(f)
+            random_forest_models[segment] = model
     return random_forest_models
 
 
