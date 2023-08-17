@@ -32,7 +32,6 @@ def get_user_data(client, user, pin, apikey, authkey, webhook_url):
 
 def intraday_options_on_indices(
     parameters,
-    strategy,  # "straddle" or "strangle"
     client=None,
     user=None,
     pin=None,
@@ -46,7 +45,6 @@ def intraday_options_on_indices(
 ):
     """
     :param parameters: parameters for the strategy (refer to the strategy's docstring)
-    :param strategy: 'straddle' or 'strangle' will invoke intraday_straddle or intraday_strangle of the index
     :param client:
     :param user:
     :param pin:
@@ -105,11 +103,11 @@ def intraday_options_on_indices(
         index_parameters = parameters.copy()
         index_parameters.update(special_parameters.get(index.name, {}))
         vs.logger.info(
-            f"Trading {index.name} {strategy} with parameters {index_parameters}"
+            f"Trading {index.name} strangle with parameters {index_parameters}"
         )
-        vs.notifier(f"Trading {index.name} {strategy}.", discord_webhook_url)
+        vs.notifier(f"Trading {index.name} strangle.", discord_webhook_url)
         thread = threading.Thread(
-            target=getattr(index, f"intraday_{strategy}"), kwargs=index_parameters
+            target=index.intraday_strangle, kwargs=index_parameters
         )
         options_threads.append(thread)
 
@@ -139,7 +137,7 @@ def intraday_options_on_indices(
             index.strategy_log["Intraday strangle"],
             f"{user}_{index.name}_intraday_strangle.json",
         )
-        vs.notifier(f"Appended data for {index.name} {strategy}.", discord_webhook_url)
+        vs.notifier(f"Appended data for {index.name} strangle", discord_webhook_url)
 
 
 def overnight_straddle_nifty(
@@ -158,7 +156,7 @@ def overnight_straddle_nifty(
     # If today is a holiday, the script will exit
     if vs.currenttime().date() in vs.holidays:
         vs.notifier(
-            "Today is either a holiday or Friday. Exiting.", discord_webhook_url
+            "Today is either a holiday. Exiting.", discord_webhook_url
         )
         exit()
 
