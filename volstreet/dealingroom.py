@@ -222,26 +222,18 @@ class PriceFeed(SmartWebSocketV2):
         exit_time=(15, 30),
         process_iv_log=True,
         market_depth=True,
-        calculate_iv=True,
+        calc_iv=True,
         stop_iv_calculation_hours=3,
         n_values=100,
     ):
         while currenttime().time() < time(*exit_time):
-            indices = self.index_option_chains_subscribed
-            for index in indices:
-                expiries_subscribed = set(
-                    [*zip(*self.symbol_option_chains[index].exp_strike_pairs)][0]
-                )
-                for expiry in expiries_subscribed:
-                    self.build_option_chain(
-                        index,
-                        expiry,
-                        market_depth,
-                        process_iv_log,
-                        calculate_iv,
-                        n_values,
-                        stop_iv_calculation_hours,
-                    )
+            self.build_all_option_chains(
+                market_depth=market_depth,
+                process_iv_log=process_iv_log,
+                calc_iv=calc_iv,
+                stop_iv_calculation_hours=stop_iv_calculation_hours,
+                n_values=n_values,
+            )
 
     def build_option_chain(
         self,
@@ -249,7 +241,7 @@ class PriceFeed(SmartWebSocketV2):
         expiry: str,
         market_depth: bool = False,
         process_iv_log: bool = False,
-        calculate_iv: bool = False,
+        calc_iv: bool = False,
         n_values: int = 100,
         stop_iv_calculation_hours: int = 3,
     ):
@@ -273,7 +265,7 @@ class PriceFeed(SmartWebSocketV2):
                 ] = put_price
                 self.symbol_option_chains[index].underlying_price = spot
 
-                if calculate_iv:
+                if calc_iv:
                     time_to_expiry = timetoexpiry(expiry)
                     if time_to_expiry < stop_iv_calculation_hours / (
                         24 * 365
@@ -324,6 +316,46 @@ class PriceFeed(SmartWebSocketV2):
                     self.symbol_option_chains[index][expiry][strike][
                         "put_best_ask_qty"
                     ] = put_option["best_ask_qty"]
+
+    def build_all_option_chains(
+        self,
+        indices: list[str] | str | None = None,
+        expiries: list[list[str]] | list[str] | str | None = None,
+        market_depth: bool = False,
+        process_iv_log: bool = False,
+        calc_iv: bool = False,
+        n_values: int = 100,
+        stop_iv_calculation_hours: int = 3,
+    ):
+        if indices is None:
+            indices = self.index_option_chains_subscribed
+        elif isinstance(indices, str):
+            indices = [indices]
+        else:
+            indices = indices
+        if expiries is None:
+            expiries = [
+                set([*zip(*self.symbol_option_chains[index].exp_strike_pairs)][0])
+                for index in indices
+            ]
+        elif isinstance(expiries, str):
+            expiries = [[expiries]]
+        elif all([isinstance(expiry, str) for expiry in expiries]):
+            expiries = [expiries]
+        else:
+            expiries = expiries
+
+        for index, exps in zip(indices, expiries):
+            for expiry in exps:
+                self.build_option_chain(
+                    index,
+                    expiry,
+                    market_depth,
+                    process_iv_log,
+                    calc_iv,
+                    n_values,
+                    stop_iv_calculation_hours,
+                )
 
     def process_iv_log(
         self,
@@ -405,11 +437,12 @@ class Option:
     def __init__(self, strike: int, option_type: str, underlying: str, expiry: str):
         self.strike = round(int(strike), 0)
 
-        self.option_type = "CE" if option_type.lower().startswith("c") else "PE"
-        self.underlying = underlying
-        self.expiry = expiry
+        option_type = option_type.upper()
+        self.option_type = "CE" if option_type.startswith("C") else "PE"
+        self.underlying = underlying.upper()
+        self.expiry = expiry.upper()
         self.symbol, self.token = fetch_symbol_token(
-            underlying, expiry, strike, option_type
+            self.underlying, self.expiry, strike, self.option_type
         )
         self.freeze_qty_in_shares = symbol_df[symbol_df["SYMBOL"] == self.underlying][
             "VOL_FRZ_QTY"
@@ -509,11 +542,11 @@ class Strangle:
         self.put_option = Option(put_strike, "PE", underlying, expiry)
         self.call_strike = self.call_option.strike
         self.put_strike = self.put_option.strike
-        self.underlying = underlying
+        self.underlying = underlying.upper()
         self.underlying_exchange = (
             "NFO" if self.underlying in ["FINNIFTY", "MIDCPNIFTY"] else "NSE"
         )  # Fin/Mid temp fix
-        self.expiry = expiry
+        self.expiry = expiry.upper()
         self.call_symbol, self.call_token = self.call_option.fetch_symbol_token()
         self.put_symbol, self.put_token = self.put_option.fetch_symbol_token()
         self.freeze_qty_in_shares = self.call_option.freeze_qty_in_shares
@@ -1216,149 +1249,6 @@ class Index:
             spliced_orders = [quantity_in_lots]
         return spliced_orders
 
-    def place_combined_order(
-        self,
-        expiry,
-        buy_or_sell,
-        quantity_in_lots,
-        strike=None,
-        call_strike=None,
-        put_strike=None,
-        return_avg_price=False,
-        order_tag="",
-        notification_url=None,
-    ):
-        """
-        Places a straddle or strangle order on the index.
-        Params:
-        strike: Strike price of the option (for straddle)
-        expiry: Expiry of the option
-        buy_or_sell: BUY or SELL
-        quantity_in_lots: Quantity in lots
-        call_strike: Strike price of the call (for strangle)
-        put_strike: Strike price of the put (for strangle)
-        return_avg_price: If True, returns the average price of the order
-        order_tag: Tag to be added to the order
-        notification_url: URL to be notified when the order is placed
-        """
-
-        if strike is None:
-            if call_strike is None and put_strike is None:
-                raise ValueError("Strike price not specified")
-            strike_info = f"{call_strike}CE {put_strike}PE"
-        elif call_strike is None and put_strike is None:
-            call_strike = strike
-            put_strike = strike
-            strike_info = f"{strike}"
-        else:
-            raise ValueError("Strike price specified twice")
-
-        call_symbol, call_token = fetch_symbol_token(
-            self.name, expiry, call_strike, "CE"
-        )
-        put_symbol, put_token = fetch_symbol_token(self.name, expiry, put_strike, "PE")
-        call_price = fetchltp("NFO", call_symbol, call_token)
-        put_price = fetchltp("NFO", put_symbol, put_token)
-
-        limit_price_extender = 1.05 if buy_or_sell == "BUY" else 0.95
-
-        spliced_orders = self.splice_orders(quantity_in_lots)
-
-        call_order_id_list = []
-        put_order_id_list = []
-        for quantity in spliced_orders:
-            call_order_id = place_order(
-                call_symbol,
-                call_token,
-                quantity * self.lot_size,
-                buy_or_sell,
-                call_price * limit_price_extender,
-                order_tag=order_tag,
-            )
-            put_order_id = place_order(
-                put_symbol,
-                put_token,
-                quantity * self.lot_size,
-                buy_or_sell,
-                put_price * limit_price_extender,
-                order_tag=order_tag,
-            )
-            call_order_id_list.append(call_order_id)
-            put_order_id_list.append(put_order_id)
-            sleep(0.3)
-
-        orderbook = fetch_book("orderbook")
-
-        call_order_statuses = lookup_and_return(
-            orderbook, "orderid", call_order_id_list, "status"
-        )
-        put_order_statuses = lookup_and_return(
-            orderbook, "orderid", put_order_id_list, "status"
-        )
-
-        order_prefix = f"{order_tag}: " if order_tag else ""
-
-        if all(call_order_statuses == "complete") and all(
-            put_order_statuses == "complete"
-        ):
-            notifier(
-                f"{order_prefix}Order(s) placed successfully for {buy_or_sell} {self.name} "
-                + f"{strike_info} {expiry} {quantity_in_lots} lot(s).",
-                notification_url,
-            )
-            call_order_avg_price = (
-                lookup_and_return(
-                    orderbook, "orderid", call_order_id_list, "averageprice"
-                )
-                .astype(float)
-                .mean()
-            )
-            put_order_avg_price = (
-                lookup_and_return(
-                    orderbook, "orderid", put_order_id_list, "averageprice"
-                )
-                .astype(float)
-                .mean()
-            )
-            if return_avg_price:
-                return call_order_avg_price, put_order_avg_price
-            else:
-                return
-        elif all(call_order_statuses == "rejected") and all(
-            put_order_statuses == "rejected"
-        ):
-            notifier(
-                f"{order_prefix}All orders rejected for {buy_or_sell} {self.name} "
-                + f"{strike_info} {expiry} {quantity_in_lots} lot(s).",
-                notification_url,
-            )
-            raise Exception("Orders rejected")
-        elif any(call_order_statuses == "open") or any(put_order_statuses == "open"):
-            notifier(
-                f"{order_prefix}Some orders pending for {buy_or_sell} {self.name} "
-                + f"{strike_info} {expiry} {quantity_in_lots} lot(s). You can modify the orders.",
-                notification_url,
-            )
-            if return_avg_price:
-                return call_price, put_price
-        elif any(call_order_statuses == "rejected") or any(
-            put_order_statuses == "rejected"
-        ):
-            notifier(
-                f"{order_prefix}Some orders rejected for {buy_or_sell} {self.name} "
-                + f"{strike_info} {expiry} {quantity_in_lots} lot(s). You can place the rejected orders again.",
-                notification_url,
-            )
-            if return_avg_price:
-                return call_price, put_price
-        else:
-            notifier(
-                f"{order_prefix}ERROR. Order statuses uncertain for {buy_or_sell} {self.name} "
-                + f"{strike_info} {expiry} {quantity_in_lots} lot(s).",
-                notification_url,
-            )
-            raise Exception("Order statuses uncertain")
-
     def place_synthetic_fut(
         self,
         strike,
@@ -1706,7 +1596,7 @@ class Index:
 
         expected_movements_ce = np.array(expected_movements["CE"])
         expected_movements_pe = np.array(expected_movements["PE"])
-        expected_movements_pe = abs(expected_movements_pe)
+        expected_movements_pe = expected_movements_pe * -1
 
         benchmark_movement_ce = expected_movements_ce[0]
         benchmark_movement_pe = expected_movements_pe[0]
@@ -2029,834 +1919,6 @@ class Index:
         self.strategy_log[order_tag].append(trade_info_dict)
 
     @log_errors
-    def intraday_straddle(
-        self,
-        quantity_in_lots,
-        exit_time=(15, 28),
-        websocket=None,
-        wait_for_equality=False,
-        move_sl=False,
-        shared_data=None,
-        stoploss="dynamic",
-        target_disparity=10,
-        catch_trend=False,
-        trend_qty_ratio=0.5,
-        trend_catcher_sl=0.003,
-        safeguard=False,
-        safeguard_movement=0.0035,
-        safeguard_spike=1.2,
-        smart_exit=False,
-        take_profit=False,
-        take_profit_points=np.inf,
-        convert_to_butterfly=False,
-        check_force_exit=False,
-        notification_url=None,
-    ):
-        """Params:
-        quantity_in_lots: int
-        exit_time: tuple
-        websocket: websocket object
-        wait_for_equality: bool
-        move_sl: bool
-        shared_data: class object
-        stoploss: str
-        target_disparity: float
-        catch_trend: bool
-        trend_qty_ratio: float
-        trend_catcher_sl: float
-        safeguard: bool
-        safeguard_movement: float
-        safeguard_spike: float
-        smart_exit: bool
-        take_profit: bool
-        take_profit_points: float
-        take_profit_order: bool
-        """
-
-        order_tag = "Intraday straddle"
-        strategy_id = currenttime().strftime("%d%m%y%H%M%S%f")
-        expiry = self.current_expiry
-        sleep_interval = 0 if take_profit else 5
-
-        # Splicing orders
-        spliced_orders = self.splice_orders(quantity_in_lots)
-
-        # Finding equal strike
-        (
-            equal_strike,
-            call_symbol,
-            call_token,
-            put_symbol,
-            put_token,
-            call_price,
-            put_price,
-        ) = self.find_equal_strike(
-            exit_time=exit_time,
-            websocket=websocket,
-            wait_for_equality=wait_for_equality,
-            target_disparity=target_disparity,
-            expiry=expiry,
-            notification_url=notification_url,
-        )
-
-        notifier(
-            f"{self.name}: Initiating intraday trade on {equal_strike} strike.",
-            notification_url,
-        )
-
-        # Placing orders
-        call_avg_price, put_avg_price = self.place_combined_order(
-            expiry,
-            "SELL",
-            quantity_in_lots,
-            strike=equal_strike,
-            return_avg_price=True,
-            order_tag=order_tag,
-            notification_url=notification_url,
-        )
-
-        underlying_price = self.fetch_ltp()
-        entry_spot = underlying_price
-
-        # Placing stoploss orders
-        if stoploss == "fixed":
-            if self.name == "BANKNIFTY":
-                sl = 1.7
-            elif self.name == "NIFTY":
-                sl = 1.5
-            else:
-                sl = 1.6
-        elif stoploss == "dynamic":
-            if self.name == "BANKNIFTY" or timetoexpiry(expiry, in_days=True) < 1:
-                sl = 1.7
-            elif self.name == "NIFTY":
-                sl = 1.5
-            else:
-                sl = 1.6
-        else:
-            sl = stoploss
-
-        call_stoploss_order_ids = []
-        put_stoploss_order_ids = []
-        stoploss_tag = f"{self.name} {strategy_id} stoploss"
-        for quantity in spliced_orders:
-            call_sl_order_id = place_order(
-                call_symbol,
-                call_token,
-                quantity * self.lot_size,
-                "BUY",
-                call_avg_price * sl,
-                order_tag=stoploss_tag,
-                stop_loss_order=True,
-            )
-            put_sl_order_id = place_order(
-                put_symbol,
-                put_token,
-                quantity * self.lot_size,
-                "BUY",
-                put_avg_price * sl,
-                order_tag=stoploss_tag,
-                stop_loss_order=True,
-            )
-            call_stoploss_order_ids.append(call_sl_order_id)
-            put_stoploss_order_ids.append(put_sl_order_id)
-            sleep(0.3)
-
-        orderbook = fetch_book("orderbook")
-        call_sl_statuses = lookup_and_return(
-            orderbook, "orderid", call_stoploss_order_ids, "status"
-        )
-        put_sl_statuses = lookup_and_return(
-            orderbook, "orderid", put_stoploss_order_ids, "status"
-        )
-
-        if all(call_sl_statuses == "trigger pending") and all(
-            put_sl_statuses == "trigger pending"
-        ):
-            notifier(
-                f"{self.name} stoploss orders placed successfully", notification_url
-            )
-        else:
-            notifier(
-                f"{self.name} stoploss orders not placed successfully", notification_url
-            )
-            raise Exception("Stoploss orders not placed successfully")
-
-        self.log_combined_order(
-            equal_strike,
-            expiry=expiry,
-            buy_or_sell="SELL",
-            call_price=call_avg_price,
-            put_price=put_avg_price,
-            order_tag=order_tag,
-        )
-        summary_message = "\n".join(
-            f"{k}: {v}" for k, v in self.order_log[order_tag][0].items()
-        )
-
-        # Recording initial iv information
-
-        traded_call_iv, traded_put_iv, traded_avg_iv = straddle_iv(
-            call_avg_price,
-            put_avg_price,
-            entry_spot,
-            equal_strike,
-            timetoexpiry(expiry),
-        )
-        summary_iv = traded_avg_iv if traded_avg_iv is not None else 0
-        summary_message += f"\nTraded IV: {summary_iv * 100:0.2f}"
-        notifier(summary_message, notification_url)
-        sleep(1)
-
-        def write_force_exit_status(user):
-            with open(f"{user}_{self.name}_force_exit.json", "w") as file:
-                json.dump(False, file)
-
-        def read_force_exit_status(user):
-            with open(f"{user}_{self.name}_force_exit.json", "r") as file:
-                status = json.load(file)
-                return status
-
-        @log_errors
-        def price_tracker():
-            nonlocal call_price, put_price, underlying_price, call_avg_price, put_avg_price, call_exit_price
-            nonlocal put_exit_price, mtm_price, profit_in_pts, call_iv, put_iv, avg_iv
-            nonlocal sl_hit_dict, take_profit_exit, ctb_trg, ctb_hedge, force_exit
-
-            # Print settings
-            last_print_time = currenttime()
-            print_interval = timedelta(seconds=5)
-
-            # General settings
-            days_to_expiry = timetoexpiry(expiry, in_days=True)
-
-            # Smart exit settings
-            smart_exit_trg = False
-            smart_exit_delta_threshold = 0.06 if days_to_expiry < 1 else 0.12
-            smart_exit_notification_sent = False
-            incremental_gains = 100
-            average_delta = 1
-
-            # Hedge settings
-            ctb_notification_sent = False
-            ctb_message = ""
-            profit_if_call_sl = put_avg_price - (call_avg_price * (sl - 1))
-            profit_if_put_sl = call_avg_price - (put_avg_price * (sl - 1))
-            ctb_threshold = max(profit_if_call_sl, profit_if_put_sl)
-
-            def process_ctb(profit_threshold):
-                strike_range = np.arange(
-                    equal_strike - self.base * 2,
-                    equal_strike + self.base * 3,
-                    self.base,
-                )  #
-                # Hard-coding 2 strikes for now
-                hedges = [*zip(strike_range, strike_range[::-1])][
-                    -2:
-                ]  # Hard-coding 2 hedges for now
-                hedges = np.array(
-                    [Strangle(pair[0], pair[1], self.name, expiry) for pair in hedges]
-                )
-                hedges_ltps = np.array([hedge.fetch_total_ltp() for hedge in hedges])
-                distance_from_equal_strike = np.array(
-                    [
-                        hedge.call_option - equal_strike
-                        if hedge.call_option < equal_strike
-                        else hedge.put_option - equal_strike
-                        for hedge in hedges
-                    ]
-                )
-                hedge_profits = (
-                    total_avg_price - hedges_ltps + distance_from_equal_strike
-                )
-                filtered_hedge = hedges[np.where(hedge_profits > profit_threshold)]
-                print(
-                    f"{self.name} CTB threshold: {profit_threshold}, Hedge working: {hedge_profits}"
-                )
-                if filtered_hedge.size > 0:
-                    filtered_hedge = filtered_hedge[0]
-                    return filtered_hedge
-
-            while in_trade and not error_faced:
-                # Update prices
-                if websocket:
-                    underlying_price = websocket.price_dict.get(
-                        self.token, {"ltp": None}
-                    )["ltp"]
-                    call_price = websocket.price_dict.get(call_token, {"ltp": None})[
-                        "ltp"
-                    ]
-                    put_price = websocket.price_dict.get(put_token, {"ltp": None})[
-                        "ltp"
-                    ]
-                else:
-                    underlying_price = self.fetch_ltp()
-                    call_price = fetchltp("NFO", call_symbol, call_token)
-                    put_price = fetchltp("NFO", put_symbol, put_token)
-
-                # Fetch stop loss status
-                callsl = sl_hit_dict["call"]
-                putsl = sl_hit_dict["put"]
-
-                # Calculate mtm price
-                mtm_ce_price = call_exit_price if callsl else call_price
-                mtm_pe_price = put_exit_price if putsl else put_price
-                mtm_price = mtm_ce_price + mtm_pe_price
-
-                # Calculate profit
-                profit_in_pts = (call_avg_price + put_avg_price) - mtm_price
-                profit_in_rs = profit_in_pts * self.lot_size * quantity_in_lots
-
-                # Continuously check if profit is greater than target profit
-                if take_profit and profit_in_pts > (
-                    take_profit_points + per_share_charges
-                ):
-                    notifier(
-                        f"{self.name} take profit exit triggered\n"
-                        f"Time: {currenttime().time()}\n"
-                        f"Profit: {profit_in_pts}\n",
-                        notification_url,
-                    )
-                    take_profit_exit = True
-
-                # If no stop-loss is hit, and it is expiry day, then check for potential hedge purchase
-                if (
-                    not (callsl or putsl)
-                    and days_to_expiry < 1
-                    and convert_to_butterfly
-                    and not ctb_notification_sent
-                ):
-                    try:
-                        ctb_hedge = process_ctb(ctb_threshold)
-                        if ctb_hedge is not None:
-                            notifier(
-                                f"{self.name} Convert to butterfly triggered\n",
-                                notification_url,
-                            )
-                            ctb_trg = True
-                            ctb_message = f"Hedged with: {ctb_hedge}\n"
-                            ctb_notification_sent = True
-                    except Exception as _e:
-                        print(f"Error in process_ctb: {_e}")
-
-                # Continuously calculate IV
-                call_iv, put_iv, avg_iv = straddle_iv(
-                    call_price,
-                    put_price,
-                    underlying_price,
-                    equal_strike,
-                    timetoexpiry(expiry),
-                )
-
-                # If one of the stop-losses is hit then checking for smart exit
-                if (
-                    smart_exit
-                    and (callsl or putsl)
-                    and not (callsl and putsl)
-                    and (call_iv or put_iv)
-                    and not smart_exit_notification_sent
-                ):
-                    option_type = "p" if callsl else "c"
-                    option_price = put_price if callsl else call_price
-                    tracked_iv = put_iv if callsl and put_iv is not None else avg_iv
-                    if tracked_iv is not None:
-                        incremental_gains, average_delta = simulate_option_movement(
-                            underlying_price,
-                            equal_strike,
-                            timetoexpiry(expiry),
-                            option_type,
-                            simulated_move=0.002,
-                            r=0.06,
-                            vol=tracked_iv,
-                            price=option_price,
-                        )
-                    else:
-                        incremental_gains, average_delta = 100, 1
-
-                    if average_delta < smart_exit_delta_threshold:
-                        if not smart_exit_notification_sent:
-                            notifier(
-                                f"{self.name} smart exit triggered\n"
-                                f"Time: {currenttime().time()}\n"
-                                f"Average delta: {average_delta}\n"
-                                f"Incremental gains: {incremental_gains}\n",
-                                notification_url,
-                            )
-                            smart_exit_notification_sent = True
-                            smart_exit_trg = True
-
-                # Check for force exit
-                if check_force_exit:
-                    force_exit = read_force_exit_status(obj.userId)
-
-                stoploss_message = ""
-                if callsl:
-                    stoploss_message += (
-                        f"Call Exit Price: {mtm_ce_price}\nIncr. Gains: {incremental_gains}\n"
-                        + f"Avg. Delta: {average_delta}\n"
-                    )
-                if putsl:
-                    stoploss_message += (
-                        f"Put Exit Price: {mtm_pe_price}\nIncr. Gains: {incremental_gains}\n"
-                        + f"Avg. Delta: {average_delta}\n"
-                    )
-                print_iv = avg_iv if avg_iv is not None else 0
-                if currenttime() - last_print_time > print_interval:
-                    print(
-                        f"Index: {self.name}\nTime: {currenttime().time()}\nStrike: {equal_strike}\n"
-                        + f"Underlying Price: {underlying_price}\nCall SL: {callsl}\nPut SL: {putsl}\n"
-                        + f"Call Price: {call_price}\nPut Price: {put_price}\n"
-                        + stoploss_message
-                        + f"Total price: {call_price + put_price:0.2f}\nMTM Price: {mtm_price:0.2f}\n"
-                        + f"Profit in points: {profit_in_pts:0.2f}\n"
-                        + f"Profit Value: {profit_in_rs:0.2f}\n"
-                        + f"IV: {print_iv * 100:0.2f}\nSmart Exit: {smart_exit_trg}\n"
-                        + ctb_message
-                    )
-                    last_print_time = currenttime()
-
-        def check_sl_orders(order_ids, side: str, data=shared_data, refresh=False):
-            """This function checks if the stop loss orders have been triggered or not. It also updates the order book
-            in the nonlocal scope. This function is responsible for setting the exit prices.
-            """
-
-            nonlocal orderbook, call_exit_price, put_exit_price, call_price, put_price, underlying_price
-            nonlocal traded_call_iv, traded_put_iv, traded_avg_iv, call_iv, put_iv, avg_iv, entry_spot
-
-            orderbook = fetch_orderbook_if_needed(data, refresh)
-            triggered, complete = process_stop_loss_order_statuses(
-                orderbook, order_ids, context=f"SL: {side}", notify_url=notification_url
-            )
-
-            if not triggered and not complete:
-                return False, False
-
-            # Checking if there has been an unjustified trigger of stoploss without much movement in the underlying
-            # We will also use IV to check if the stoploss was justified or not
-            if triggered and safeguard:
-                movement_from_entry = abs((underlying_price / entry_spot) - 1)
-                present_iv = (
-                    call_iv if side == "call" and call_iv is not None else avg_iv
-                )
-                present_price = call_price if side == "call" else put_price
-                original_iv = (
-                    traded_call_iv
-                    if side == "call" and traded_call_iv is not None
-                    else traded_avg_iv
-                )
-
-                if present_iv is None or original_iv is None:
-                    notifier(
-                        f"{self.name} {side.capitalize()} stoploss triggered. "
-                        f"Unable to calculate IV spike due to missing IV data.",
-                        notification_url,
-                    )
-                else:
-                    price_function = bs.call if side == "call" else bs.put
-                    iv_spike = present_iv / original_iv
-                    ideal_price = price_function(
-                        underlying_price,
-                        equal_strike,
-                        timetoexpiry(expiry),
-                        0.06,
-                        original_iv,
-                    )
-                    price_spike = present_price / ideal_price
-
-                    if movement_from_entry < safeguard_movement and (
-                        iv_spike > safeguard_spike or price_spike > safeguard_spike
-                    ):
-                        notifier(
-                            f"{self.name} {side.capitalize()} stoploss triggered without much "
-                            f"movement in the underlying or because of IV/Price spike.\n"
-                            f"Movement: {movement_from_entry * 100:0.2f}\nPresent IV: {present_iv}\n"
-                            f"IV spike: {iv_spike}\nIdeal Price: {ideal_price}\nPresent Price: {present_price}\n"
-                            f"Price Spike: {price_spike}",
-                            notification_url,
-                        )
-                    else:
-                        notifier(
-                            f"{self.name} {side.capitalize()} stoploss triggered. "
-                            f"Movement: {movement_from_entry * 100:0.2f}\nPresent IV: {present_iv}\n"
-                            f"IV spike: {iv_spike}\nIdeal Price: {ideal_price}\nPresent Price: {present_price}\n"
-                            f"Price Spike: {price_spike}",
-                            notification_url,
-                        )
-            if complete:
-                exit_price = (
-                    lookup_and_return(orderbook, "orderid", order_ids, "averageprice")
-                    .astype(float)
-                    .mean()
-                )
-            else:
-                exit_price = call_price if side == "call" else put_price
-
-            if side == "call":
-                call_exit_price = exit_price
-            else:
-                put_exit_price = exit_price
-
-            return True, complete
-
-        def check_exit_conditions(time_now, time_of_exit, *bools):
-            return time_now >= time_of_exit or any(bools)
-
-        @log_errors
-        def trend_catcher(sl_type, qty_ratio, trend_sl):
-            nonlocal underlying_price, take_profit_exit, in_trade, force_exit
-
-            strike = findstrike(underlying_price, self.base)
-            opt_type = "PE" if sl_type == "call" else "CE"
-            symbol, token = fetch_symbol_token(self.name, expiry, strike, opt_type)
-            option_ltp = fetchltp("NFO", symbol, token)
-            qty = max(int(quantity_in_lots * qty_ratio), 1)
-            trend_spliced_orders = self.splice_orders(qty)
-            for spliced_qty in trend_spliced_orders:
-                place_order(
-                    symbol, token, spliced_qty * self.lot_size, "SELL", option_ltp * 0.9
-                )
-            sl_price = (
-                (underlying_price * (1 - trend_sl))
-                if sl_type == "call"
-                else (underlying_price * (1 + trend_sl))
-            )
-            notifier(
-                f"{self.name} {sl_type} trend catcher starting. "
-                + f"Placed {qty} lots of {strike} {opt_type} at {option_ltp}. "
-                + f"Stoploss price: {sl_price}, Underlying Price: {underlying_price}",
-                notification_url,
-            )
-            trend_sl_hit = False
-            last_print_time = currenttime()
-            print_interval = timedelta(seconds=10)
-            while not check_exit_conditions(
-                currenttime().time(),
-                time(*exit_time),
-                trend_sl_hit,
-                self.intraday_straddle_forced_exit,
-                take_profit_exit,
-                not in_trade,
-                force_exit,
-            ):
-                if sl_type == "call":
-                    trend_sl_hit = underlying_price < sl_price
-                else:
-                    trend_sl_hit = underlying_price > sl_price
-                sleep(1)
-                if currenttime() - last_print_time > print_interval:
-                    last_print_time = currenttime()
-                    print(
-                        f"{self.name} {sl_type} trend catcher running. "
-                        + f"Stoploss price: {sl_price}, Underlying Price: {underlying_price} "
-                        + f"Stoploss hit: {trend_sl_hit}"
-                    )
-
-            if trend_sl_hit:
-                notifier(
-                    f"{self.name} {sl_type} trend catcher stoploss hit.",
-                    notification_url,
-                )
-            else:
-                notifier(
-                    f"{self.name} {sl_type} trend catcher exiting.", notification_url
-                )
-
-            for qty in trend_spliced_orders:
-                place_order(symbol, token, qty * self.lot_size, "BUY", "MARKET")
-
-        def process_sl_hit(
-            sl_type,
-            sl_dict,
-            sl_orders_complete,
-            symbol,
-            token,
-            other_symbol,
-            other_token,
-            other_stoploss_order_ids,
-            other_avg_price,
-        ):
-            nonlocal take_profit_exit, call_exit_price, put_exit_price
-
-            if all(sl_dict.values()):
-                # print(f'{self.name} both stoploss orders completed. Not processing {sl_type}.')
-                return
-
-            other_sl_type = "call" if sl_type == "put" else "put"
-
-            if not sl_orders_complete:
-                for qty in spliced_orders:
-                    place_order(symbol, token, qty * self.lot_size, "BUY", "MARKET")
-
-            if catch_trend:
-                trend_thread = Thread(
-                    target=trend_catcher,
-                    args=(sl_type, trend_qty_ratio, trend_catcher_sl),
-                )
-                trend_thread.start()
-
-            if move_sl:
-                for o_id in other_stoploss_order_ids:
-                    obj.cancelOrder(o_id, "STOPLOSS")
-
-                other_stoploss_order_ids.clear()
-                for qty in spliced_orders:
-                    sl_order_id = place_order(
-                        other_symbol,
-                        other_token,
-                        qty * self.lot_size,
-                        "BUY",
-                        other_avg_price,
-                        order_tag=stoploss_tag,
-                        stop_loss_order=True,
-                    )
-                    other_stoploss_order_ids.append(sl_order_id)
-
-            # notifier(f'{self.name} {sl_type} stoploss triggered and completed.', notification_url)
-
-            refresh = True
-            sleep(5)
-            while not check_exit_conditions(
-                currenttime().time(),
-                time(*exit_time),
-                sl_dict[other_sl_type],
-                self.intraday_straddle_forced_exit,
-                take_profit_exit,
-                force_exit,
-            ):
-                sl_dict[other_sl_type], other_sl_orders_complete = check_sl_orders(
-                    other_stoploss_order_ids, other_sl_type, refresh=refresh
-                )
-                if sl_dict[other_sl_type]:
-                    if not other_sl_orders_complete:
-                        for qty in spliced_orders:
-                            place_order(
-                                other_symbol,
-                                other_token,
-                                qty * self.lot_size,
-                                "BUY",
-                                "MARKET",
-                            )
-                    break
-                else:
-                    sleep(sleep_interval)
-                refresh = False
-
-        def process_exit(call_stop_loss_hit, put_stop_loss_hit, hedged=False):
-            def exit_spliced_orders(orders, side):
-                symbol = call_symbol if side == "call" else put_symbol
-                token = call_token if side == "call" else put_token
-                price = call_price if side == "call" else put_price
-
-                for qty in orders:
-                    place_order(
-                        symbol,
-                        token,
-                        qty * self.lot_size,
-                        "BUY",
-                        price * 1.1,
-                        "Exit order",
-                    )
-                    sleep(0.3)
-
-            if call_stop_loss_hit and put_stop_loss_hit:
-                sl_type = "Both"
-            elif call_stop_loss_hit:
-                sl_type = "Call"
-                exit_spliced_orders(spliced_orders, "put")
-            elif put_stop_loss_hit:
-                sl_type = "Put"
-                exit_spliced_orders(spliced_orders, "call")
-            else:
-                sl_type = "None"
-                self.place_combined_order(
-                    expiry,
-                    "BUY",
-                    quantity_in_lots,
-                    strike=equal_strike,
-                    notification_url=notification_url,
-                )
-                if hedged:
-                    # noinspection PyUnresolvedReferences
-                    self.place_combined_order(
-                        expiry,
-                        "SELL",
-                        quantity_in_lots,
-                        call_strike=ctb_hedge.call_strike,
-                        put_strike=ctb_hedge.put_strike,
-                        notification_url=notification_url,
-                    )
-
-            return sl_type
-
-        # After placing the orders and stoploss orders setting up nonlocal variables
-        in_trade = True
-        error_faced = False
-
-        # Take profit settings
-        take_profit_exit = False
-
-        # Convert to butterfly settings
-        ctb_trg = False
-        ctb_hedge = None
-
-        # Writing force exit status
-        force_exit = False
-        if check_force_exit:
-            write_force_exit_status(obj.userId)
-
-        # Price information
-        call_exit_price = 0
-        put_exit_price = 0
-        mtm_price = 0
-        profit_in_pts = 0
-
-        # IV information
-        call_iv = 0
-        put_iv = 0
-        avg_iv = 0
-
-        # Basic price information being set in outer scope as well
-        total_avg_price = call_avg_price + put_avg_price
-        if take_profit:
-            per_share_charges = charges(
-                (call_avg_price + put_avg_price),
-                self.lot_size,
-                quantity_in_lots,
-                self.lot_size,
-            )
-            break_even_price = total_avg_price - per_share_charges
-            notifier(
-                f"{self.name}: Charges per share {per_share_charges} | Break even price {break_even_price}",
-                notification_url,
-            )
-
-        # Setting up stop loss dictionary and starting price thread
-        sl_hit_dict = {"call": False, "put": False}
-        price_updater = Thread(target=price_tracker)
-
-        sleep(5)
-        refresh_orderbook = True
-        price_updater.start()
-        # Monitoring begins here
-        while not check_exit_conditions(
-            currenttime().time(),
-            time(*exit_time),
-            any(sl_hit_dict.values()),
-            self.intraday_straddle_forced_exit,
-            take_profit_exit,
-            ctb_trg,
-            force_exit,
-        ):
-            try:
-                sl_hit_dict["call"], call_sl_orders_complete = check_sl_orders(
-                    call_stoploss_order_ids, "call", refresh=refresh_orderbook
-                )
-                sl_hit_dict["put"], put_sl_orders_complete = check_sl_orders(
-                    put_stoploss_order_ids, "put", refresh=refresh_orderbook
-                )
-            except Exception as e:
-                notifier(f"{self.name} Error: {e}", notification_url)
-                error_faced = True
-                price_updater.join()
-                raise Exception(f"Error: {e}")
-
-            if sl_hit_dict["call"]:
-                process_sl_hit(
-                    "call",
-                    sl_hit_dict,
-                    call_sl_orders_complete,
-                    call_symbol,
-                    call_token,
-                    put_symbol,
-                    put_token,
-                    put_stoploss_order_ids,
-                    put_avg_price,
-                )
-
-            if sl_hit_dict["put"]:
-                process_sl_hit(
-                    "put",
-                    sl_hit_dict,
-                    put_sl_orders_complete,
-                    put_symbol,
-                    put_token,
-                    call_symbol,
-                    call_token,
-                    call_stoploss_order_ids,
-                    call_avg_price,
-                )
-            refresh_orderbook = False
-            sleep(sleep_interval)
-
-        # Out of main loop
-
-        # If we are hedged then wait till exit time
-        if ctb_trg:
-            # noinspection PyUnresolvedReferences
-            self.place_combined_order(
-                expiry,
-                "BUY",
-                quantity_in_lots,
-                call_strike=ctb_hedge.call_strike,
-                put_strike=ctb_hedge.put_strike,
-                order_tag=order_tag + " CTB",
-                notification_url=notification_url,
-            )
-            cancel_pending_orders(call_stoploss_order_ids + put_stoploss_order_ids)
-            notifier(f"{self.name}: Converted to butterfly", notification_url)
-            while not check_exit_conditions(currenttime().time(), time(*exit_time)):
-                sleep(3)
-
-        # After a complete exit is triggered
-        sl_hit_call, sl_hit_put = sl_hit_dict["call"], sl_hit_dict["put"]
-
-        # Fetching prices as a backup incase websocket has failed
-        if websocket:
-            call_price = fetchltp("NFO", call_symbol, call_token)
-            put_price = fetchltp("NFO", put_symbol, put_token)
-
-        # Exiting remaining positions if any
-        stop_loss_type = process_exit(sl_hit_call, sl_hit_put, hedged=ctb_trg)
-
-        # New code for cancelling pending orders
-        pending_order_ids = lookup_and_return(
-            "orderbook",
-            ["ordertag", "status"],
-            [stoploss_tag, "trigger pending"],
-            "orderid",
-        )
-
-        if isinstance(pending_order_ids, (str, np.ndarray)):
-            cancel_pending_orders(pending_order_ids)
-
-        # Exit price information
-        c_exit_price = call_exit_price if sl_hit_call else call_price
-        p_exit_price = put_exit_price if sl_hit_put else put_price
-
-        exit_dict = {
-            "Call exit price": c_exit_price,
-            "Put exit price": p_exit_price,
-            "Total exit price": c_exit_price + p_exit_price,
-            "Points captured": profit_in_pts,
-            "Stoploss": stop_loss_type,
-        }
-
-        try:
-            self.order_log[order_tag][0].update(exit_dict)
-        except Exception as e:
-            notifier(
-                f"{self.name}: Error updating order list with exit details. {e}",
-                notification_url,
-            )
-
-        notifier(
-            f"{self.name}: Exited positions\n"
-            + "".join([f"{key}: {value}\n" for key, value in exit_dict.items()]),
-            notification_url,
-        )
-        in_trade = False
-
-    @log_errors
     def intraday_strangle(
         self,
         quantity_in_lots,
@@ -2876,6 +1938,8 @@ class Index:
         place_sl_orders=False,
         move_sl_to_cost=False,
         convert_to_butterfly=False,
+        conversion_method="breakeven",
+        conversion_threshold_pct=0.175,
         shared_data=None,
         notification_url=None,
     ):
@@ -2916,6 +1980,10 @@ class Index:
             Move other stop loss to cost or not, by default False
         convert_to_butterfly : bool, optional
             Convert to butterfly or not, by default False
+        conversion_method : str, optional
+            Conversion method for butterfly, by default 'breakeven'
+        conversion_threshold_pct : float, optional
+            Conversion threshold for butterfly if conversion method is 'pct', by default 0.175
         shared_data : SharedData class, optional
             shared data about client level orderbook and positions, by default None
         notification_url : str, optional
@@ -2941,23 +2009,57 @@ class Index:
             # Conversion to butterfly
             ctb_notification_sent = False
             ctb_message = ""
-            c_sl = call_stop_loss if call_stop_loss is not None else stop_loss
-            p_sl = put_stop_loss if put_stop_loss is not None else stop_loss
-            profit_if_call_sl = p_avg_price - (c_avg_price * (c_sl - 1))
-            profit_if_put_sl = c_avg_price - (p_avg_price * (p_sl - 1))
-            ctb_threshold = max(profit_if_call_sl, profit_if_put_sl)
-            ctb_call_strike = traded_strangle.call_strike + self.base
-            ctb_put_strike = traded_strangle.put_strike - self.base
-            ctb_hedge = Strangle(ctb_call_strike, ctb_put_strike, self.name, expiry)
+            ctb_hedge = None
+            conversion_threshold_break_even = None
 
-            def process_ctb(h_strangle):
+            def process_ctb(
+                h_strangle: Strangle,
+                method: str,
+                threshold_break_even: float | None,
+                threshold_pct: float,
+                total_price: float,
+            ) -> bool:
                 hedge_total_ltp = h_strangle.fetch_total_ltp()
 
-                hedge_profit = (
-                    info_dict["total_avg_price"] - hedge_total_ltp - self.base
-                )
+                if method == "breakeven":
+                    hedge_profit = (
+                        info_dict["total_avg_price"] - hedge_total_ltp - self.base
+                    )
+                    print(
+                        f"Checking breakeven method: {hedge_profit} >= {threshold_break_even}"
+                    )
+                    return hedge_profit >= threshold_break_even
 
-                return hedge_profit
+                elif method == "pct":
+                    print(
+                        f"Checking pct method: {hedge_total_ltp} <= {total_price*threshold_pct}"
+                    )
+                    return hedge_total_ltp <= total_price * threshold_pct
+
+                else:
+                    raise ValueError(
+                        f"Invalid conversion method: {method}. Valid methods are 'breakeven' and 'pct'."
+                    )
+
+            if convert_to_butterfly:
+                ctb_call_strike = traded_strangle.call_strike + self.base
+                ctb_put_strike = traded_strangle.put_strike - self.base
+                ctb_hedge = Strangle(ctb_call_strike, ctb_put_strike, self.name, expiry)
+                if conversion_method == "breakeven":
+                    c_sl = call_stop_loss if call_stop_loss is not None else stop_loss
+                    p_sl = put_stop_loss if put_stop_loss is not None else stop_loss
+                    profit_if_call_sl = p_avg_price - (c_avg_price * (c_sl - 1))
+                    profit_if_put_sl = c_avg_price - (p_avg_price * (p_sl - 1))
+
+                    conversion_threshold_break_even = max(
+                        profit_if_call_sl, profit_if_put_sl
+                    )
+                elif conversion_method == "pct":
+                    conversion_threshold_break_even = None
+                else:
+                    raise ValueError(
+                        f"Invalid conversion method: {conversion_method}. Valid methods are 'breakeven' and 'pct'."
+                    )
 
             last_print_time = currenttime()
             last_log_time = currenttime()
@@ -3027,14 +2129,14 @@ class Index:
                     and not ctb_notification_sent
                 ):
                     try:
-                        ctb_hedge_profit = process_ctb(ctb_hedge)
-                        if currenttime() - last_log_time > log_interval:
-                            logger.info(
-                                f"{self.name} Conversion to butterfly profit: {ctb_hedge_profit}, "
-                                f"Conversion to butterfly threshold: {ctb_threshold}"
-                            )
-
-                        if ctb_hedge_profit >= ctb_threshold:
+                        ctb_trigger = process_ctb(
+                            ctb_hedge,
+                            conversion_method,
+                            conversion_threshold_break_even,
+                            conversion_threshold_pct,
+                            info_dict["total_avg_price"],
+                        )
+                        if ctb_trigger:
                             notifier(
                                 f"{self.name} Convert to butterfly triggered\n",
                                 notification_url,
@@ -3239,7 +2341,7 @@ class Index:
                     stop_loss_justified = justify_stop_loss(info_dict, side)
                     price_increase = avg_price / stop_loss_price
                     if (
-                        stop_loss_justified or price_increase > 1.8
+                        stop_loss_justified or price_increase > 1.5
                     ):  # Remove hard coded safety number
                         info_dict[f"{side}_sl"] = True
 
@@ -3873,185 +2975,6 @@ class Index:
             entries += 1
 
         self.strategy_log[strategy_tag].extend(entries_log)
-
-    def intraday_straddle_delta_hedged(
-        self,
-        quantity_in_lots,
-        exit_time=(15, 30),
-        websocket=None,
-        wait_for_equality=False,
-        delta_threshold=1,
-        notification_url=None,
-        **kwargs,
-    ):
-        # Finding equal strike
-        (
-            equal_strike,
-            call_symbol,
-            put_symbol,
-            call_token,
-            put_token,
-            call_price,
-            put_price,
-        ) = self.find_equal_strike(
-            exit_time,
-            websocket,
-            wait_for_equality,
-            notification_url=notification_url,
-            **kwargs,
-        )
-        expiry = self.current_expiry
-        print(
-            f"Index: {self.name}, Strike: {equal_strike}, Call: {call_price}, Put: {put_price}"
-        )
-        notifier(
-            f"{self.name}: Initiating intraday trade on {equal_strike} strike.",
-            notification_url,
-        )
-
-        # Placing orders
-        self.place_combined_order(
-            expiry,
-            "SELL",
-            quantity_in_lots,
-            strike=equal_strike,
-            return_avg_price=True,
-            order_tag="Intraday straddle with delta",
-            notification_url=notification_url,
-        )
-
-        positions = {
-            f"{self.name} {equal_strike} {expiry} CE": {
-                "token": call_token,
-                "quantity": -1 * quantity_in_lots * self.lot_size,
-                "delta_quantity": 0,
-            },
-            f"{self.name} {equal_strike} {expiry} PE": {
-                "token": put_token,
-                "quantity": -1 * quantity_in_lots * self.lot_size,
-                "delta_quantity": 0,
-            },
-        }
-
-        synthetic_fut_call = f"{self.name} {equal_strike} {expiry} CE"
-        synthetic_fut_put = f"{self.name} {equal_strike} {expiry} PE"
-        delta_threshold = delta_threshold * self.lot_size
-
-        while currenttime().time() < time(*exit_time):
-            position_df = pd.DataFrame(positions).T
-            if websocket:
-                underlying_price = websocket.price_dict.get(self.token, 0)["ltp"]
-                position_df["ltp"] = position_df["token"].apply(
-                    lambda x: websocket.price_dict.get(x, "None")["ltp"]
-                )
-            else:
-                underlying_price = self.fetch_ltp()
-                position_df["ltp"] = position_df.index.map(
-                    lambda x: fetchltp("NFO", *fetch_symbol_token(x))
-                )
-
-            position_df[["iv", "delta", "gamma"]] = position_df.apply(
-                lambda row: calc_greeks(row.name, row.ltp, underlying_price), axis=1
-            ).tolist()
-
-            position_df["total_quantity"] = (
-                position_df["quantity"] + position_df["delta_quantity"]
-            )
-            position_df["delta"] = position_df.delta * position_df.total_quantity
-            position_df["gamma"] = position_df.gamma * position_df.total_quantity
-            position_df.loc["Total"] = position_df.agg(
-                {"delta": "sum", "gamma": "sum", "iv": "mean", "ltp": "mean"}
-            )
-            current_delta = position_df.loc["Total", "delta"]
-            current_gamma = position_df.loc["Total", "gamma"]
-
-            print(
-                f'\n**** Starting Loop ****\n{position_df.drop(["token"], axis=1).to_string()}\n'
-                + f"\nCurrent delta: {current_delta}\n"
-            )
-
-            if abs(current_delta) > delta_threshold:
-                if current_delta > 0:  # We are long
-                    lots_to_sell = round(abs(current_delta) / self.lot_size, 0)
-                    notifier(
-                        f"Delta greater than {delta_threshold}. Selling {lots_to_sell} "
-                        + f"synthetic futures to reduce delta.\n",
-                        notification_url,
-                    )
-                    place_synthetic_fut_order(
-                        self.name,
-                        equal_strike,
-                        expiry,
-                        "SELL",
-                        lots_to_sell,
-                    )
-                    positions[synthetic_fut_call]["delta_quantity"] -= (
-                        lots_to_sell * self.lot_size
-                    )
-                    positions[synthetic_fut_put]["delta_quantity"] += (
-                        lots_to_sell * self.lot_size
-                    )
-
-                else:  # We are short
-                    lots_to_buy = round(abs(current_delta) / self.lot_size, 0)
-                    notifier(
-                        f"Delta less than -{delta_threshold}. Buying {lots_to_buy} "
-                        + f"synthetic futures to reduce delta.\n",
-                        notification_url,
-                    )
-                    place_synthetic_fut_order(
-                        self.name,
-                        equal_strike,
-                        expiry,
-                        "BUY",
-                        lots_to_buy,
-                    )
-                    positions[synthetic_fut_call]["delta_quantity"] += (
-                        lots_to_buy * self.lot_size
-                    )
-                    positions[synthetic_fut_put]["delta_quantity"] -= (
-                        lots_to_buy * self.lot_size
-                    )
-
-            sleep(2)
-
-        # Closing the main positions along with the delta positions if any are open
-        notifier(f"Intraday straddle with delta: Closing positions.", notification_url)
-        self.place_combined_order(
-            expiry,
-            "BUY",
-            quantity_in_lots,
-            strike=equal_strike,
-            order_tag="Intraday straddle with delta",
-            notification_url=notification_url,
-        )
-
-        # Squaring off the delta positions
-        call_delta_quantity = positions[synthetic_fut_call]["delta_quantity"]
-        put_delta_quantity = positions[synthetic_fut_put]["delta_quantity"]
-
-        if call_delta_quantity != 0 and put_delta_quantity != 0:
-            assert call_delta_quantity == -1 * put_delta_quantity
-            quantity_to_square_up = abs(call_delta_quantity)
-            quantity_to_square_up_in_lots = quantity_to_square_up / self.lot_size
-
-            if call_delta_quantity > 0:
-                action = "SELL"
-            else:
-                action = "BUY"
-
-            self.place_synthetic_fut(
-                equal_strike, expiry, action, quantity_to_square_up_in_lots
-            )
-            notifier(
-                f"Intraday Straddle with delta: Squared off delta positions. "
-                + f"{action} {quantity_to_square_up} synthetic futures.",
-                notification_url,
-            )
-        elif call_delta_quantity == 0 and put_delta_quantity == 0:
-            notifier("No delta positions to square off.", notification_url)
-        else:
-            raise AssertionError("Delta positions are not balanced.")
 
 
 class Stock(Index):
@@ -5488,7 +4411,9 @@ def handle_open_orders(*order_ids, action, modify_percentage=0.01, stage=0):
         print("All orders are now complete or closed, exiting function")
 
 
-def handle_open_orders_lite(*order_ids, orderbook, action, modify_percentage=0.02):
+def handle_open_orders_lite(
+    *order_ids, action, modify_percentage=0.02, orderbook="orderbook", sleep_interval=1
+):
     """Modifies orders if they are pending by the provided modification percentage"""
 
     iterations = 0.1 / modify_percentage
@@ -5531,11 +4456,11 @@ def handle_open_orders_lite(*order_ids, orderbook, action, modify_percentage=0.0
             order_params[order_id]["price"] = new_price
             modified_params.pop("status")
 
-            obj.modifyOrder(modified_params)
-
-            print(
-                f"Modified order {order_id} with new price: {new_price} from old price: {old_price}"
-            )
+            try:
+                obj.modifyOrder(modified_params)
+            except Exception as e:
+                logger.error(f"Error in modifying order: {e}")
+            sleep(sleep_interval)
 
 
 def cancel_pending_orders(order_ids, variety="STOPLOSS"):

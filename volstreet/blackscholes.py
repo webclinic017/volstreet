@@ -408,19 +408,20 @@ def target_movement(
         - target_price
     )
 
+    # Setting the bounds for the brentq function
     if target_price > starting_price:
         if flag == "c":
-            a = starting_spot
+            a = starting_spot * 0.1  # Remove hardcoded buffer
             b = 2 * starting_spot
         else:
             a = 0.05
-            b = starting_spot
+            b = starting_spot * 2  # Remove hardcoded buffer
     else:
         if flag == "c":
             a = 0.05
-            b = starting_spot
+            b = starting_spot * 2  # Remove hardcoded buffer
         else:
-            a = starting_spot
+            a = starting_spot * 0.1  # Remove hardcoded buffer
             b = 2 * starting_spot
 
     target_spot = brentq(
