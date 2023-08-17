@@ -155,9 +155,7 @@ def overnight_straddle_nifty(
 
     # If today is a holiday, the script will exit
     if vs.currenttime().date() in vs.holidays:
-        vs.notifier(
-            "Today is either a holiday. Exiting.", discord_webhook_url
-        )
+        vs.notifier("Today is a holiday. Exiting.", discord_webhook_url)
         exit()
 
     vs.login(
